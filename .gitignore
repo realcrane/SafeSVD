@@ -1,0 +1,23 @@
+# Downloaded or generated ML assets
+artifacts/
+assets/
+data/
+checkpoints/
+rank_cache/
+compressed_models/
+
+# Experiment outputs
+outputs/
+logs/
+wandb/
+*.out
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Local configuration and secrets
+.env
+hf_token

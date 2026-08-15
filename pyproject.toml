@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "safe-svd"
+version = "0.0.0"
+description = "Unified routes for reproducible SAFE-SVD compression"
+requires-python = ">=3.10"
+
+[project.scripts]
+safe-svd = "safesvd.cli:main"
+
+[tool.setuptools]
+packages = ["safesvd", "safesvd.adapters"]
