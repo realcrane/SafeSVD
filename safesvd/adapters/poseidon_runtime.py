@@ -8,13 +8,14 @@ Fisher loss.  All SVD mathematics is imported from :mod:`safesvd.core`.
 from __future__ import annotations
 
 import json
+import random
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 from safesvd.core import (
     CompressionCallbacks,
@@ -79,6 +80,90 @@ class PoseidonOptions:
         )
 
 
+class TrajectorySubset(Dataset):
+    """A complete-trajectory calibration subset preserving source metadata."""
+
+    def __init__(self, dataset, trajectory_indices: list[int]) -> None:
+        self.source_dataset = dataset
+        self.selected_trajectory_indices = tuple(trajectory_indices)
+        self.num_trajectories = len(self.selected_trajectory_indices)
+        total = int(dataset.num_trajectories)
+        if total <= 0:
+            raise ValueError("The source dataset must contain at least one trajectory.")
+        if len(set(self.selected_trajectory_indices)) != self.num_trajectories:
+            raise ValueError("trajectory_indices must not contain duplicates.")
+        if any(index < 0 or index >= total for index in self.selected_trajectory_indices):
+            raise IndexError(f"trajectory_indices must be in [0, {total}).")
+        if len(dataset) % total:
+            raise ValueError("Dataset length must be divisible by num_trajectories.")
+        samples_per_trajectory = len(dataset) // total
+        self.sample_indices = tuple(
+            trajectory * samples_per_trajectory + offset
+            for trajectory in self.selected_trajectory_indices
+            for offset in range(samples_per_trajectory)
+        )
+
+    def __len__(self) -> int:
+        return len(self.sample_indices)
+
+    def __getitem__(self, index: int):
+        return self.source_dataset[self.sample_indices[index]]
+
+    def __getattr__(self, name: str):
+        if name == "source_dataset":
+            raise AttributeError(name)
+        return getattr(object.__getattribute__(self, "source_dataset"), name)
+
+
+class PrevTimeDataset(Dataset):
+    """Poseidon's previous-time counterpart used by temporal Fisher loss."""
+
+    def __init__(self, base_dataset) -> None:
+        self.base_dataset = base_dataset
+
+    def __len__(self) -> int:
+        return len(self.base_dataset)
+
+    def __getitem__(self, index: int):
+        _, _, time_start, time_end = self.base_dataset._idx_map(index)
+        return self.base_dataset[index - 1] if time_end > time_start else self.base_dataset[index]
+
+    def __getattr__(self, name: str):
+        return getattr(self.base_dataset, name)
+
+
+def build_calibration_dataset(
+    dataset_factory,
+    *,
+    dataset_name: str,
+    num_trajectories: int,
+    random_calibration: bool,
+    calibration_seed: int,
+    **dataset_kwargs,
+):
+    """Build the exact fixed-prefix or seeded trajectory selection of MySVD_origin."""
+    if num_trajectories <= 0:
+        raise ValueError("num_trajectories must be positive.")
+    dataset = dataset_factory(
+        dataset=dataset_name,
+        which="train",
+        num_trajectories=-1 if random_calibration else num_trajectories,
+        **dataset_kwargs,
+    )
+    if not random_calibration:
+        return dataset
+    total = int(dataset.num_trajectories)
+    if num_trajectories > total:
+        raise ValueError(f"Cannot sample {num_trajectories} trajectories from {total}.")
+    return TrajectorySubset(dataset, random.Random(calibration_seed).sample(range(total), num_trajectories))
+
+
+def describe_calibration_selection(dataset, random_calibration: bool) -> str:
+    if random_calibration:
+        return f"random training trajectory indices: {list(dataset.selected_trajectory_indices)}"
+    return f"fixed training trajectory prefix: [0, {dataset.num_trajectories})"
+
+
 def _prepend_import_path(path: Path) -> None:
     text = str(path)
     if text not in sys.path:
@@ -92,10 +177,6 @@ def _imports(options: PoseidonOptions):
     try:
         from poseidon_main.scOT.inference import get_trainer, rollout
         from poseidon_main.scOT.problems.base import get_dataset
-        from backends.poseidon.paper.helper.calibration_dataset import (
-            build_calibration_dataset,
-            describe_calibration_selection,
-        )
         from backends.poseidon.paper.helper.fisher_collector import (
             collect_fisher_dict_linear_only,
             collect_fisher_dict_time_sob,
@@ -113,10 +194,8 @@ def _imports(options: PoseidonOptions):
         ) from exc
     return {
         "as_2d_x": as_2d_x,
-        "build_calibration_dataset": build_calibration_dataset,
         "collect_fisher_dict_linear_only": collect_fisher_dict_linear_only,
         "collect_fisher_dict_time_sob": collect_fisher_dict_time_sob,
-        "describe_calibration_selection": describe_calibration_selection,
         "get_dataset": get_dataset,
         "get_module_by_name": get_module_by_name,
         "get_trainer": get_trainer,
@@ -199,7 +278,6 @@ def _load_or_collect_fisher(options: PoseidonOptions, trainer, calibration_data,
         "balance_ratio": int(options.balance_ratio),
     }
     if options.use_prev_time:
-        from backends.poseidon.paper.helper.prevds_collector import PrevTimeDataset
         fisher = helpers["collect_fisher_dict_time_sob"](
             trainer, options.dataset, loader, DataLoader(PrevTimeDataset(calibration_data), batch_size=32, shuffle=False),
             options.device, **kwargs,
@@ -219,7 +297,7 @@ def run_poseidon(options: PoseidonOptions) -> Path:
         raise ValueError("final_time must be greater than time_back")
     helpers = _imports(options)
     target_time = options.final_time - options.time_back
-    calibration_data = helpers["build_calibration_dataset"](
+    calibration_data = build_calibration_dataset(
         helpers["get_dataset"],
         dataset_name=options.dataset,
         num_trajectories=options.traj_num,
@@ -230,7 +308,7 @@ def run_poseidon(options: PoseidonOptions) -> Path:
         time_step_size=1,
         max_num_time_steps=target_time,
     )
-    print("Calibration selection:", helpers["describe_calibration_selection"](calibration_data, options.random_calibration))
+    print("Calibration selection:", describe_calibration_selection(calibration_data, options.random_calibration))
     trainer = helpers["get_trainer"](model_path=str(options.model_path), batch_size=256, dataset=calibration_data)
 
     fisher = _load_or_collect_fisher(options, trainer, calibration_data, helpers)
