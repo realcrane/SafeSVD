@@ -12,8 +12,8 @@ from tqdm import tqdm
 from safesvd.core.whitening import svd_whitener
 
 # Poseidon / ScOT 依赖（仅用于取数据与构建 trainer；不做任何 whitening/profiling）
-from poseidon_main.scOT.inference import get_trainer, rollout
-from poseidon_main.scOT.problems.base import get_dataset
+from poseidon.scOT.inference import get_trainer, rollout
+from poseidon.scOT.problems.base import get_dataset
 
 current_path = os.path.dirname(os.path.abspath(__file__))
 parent_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -49,7 +49,7 @@ def quiet_everything():
     loggers = [
         logging.getLogger(),                         # root
         logging.getLogger("transformers"),
-        logging.getLogger("poseidon_main"),          # 你项目里的 logger（如果有）
+        logging.getLogger("poseidon"),          # 你项目里的 logger（如果有）
     ]
     old_levels = [lg.level for lg in loggers]
     for lg in loggers:

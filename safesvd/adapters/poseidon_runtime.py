@@ -175,8 +175,8 @@ def _imports(options: PoseidonOptions):
     _prepend_import_path(options.repo_root)
     _prepend_import_path(options.poseidon_root)
     try:
-        from poseidon_main.scOT.inference import get_trainer, rollout
-        from poseidon_main.scOT.problems.base import get_dataset
+        from poseidon.scOT.inference import get_trainer, rollout
+        from poseidon.scOT.problems.base import get_dataset
         from backends.poseidon.paper.helper.fisher_collector import (
             collect_fisher_dict_linear_only,
             collect_fisher_dict_time_sob,
