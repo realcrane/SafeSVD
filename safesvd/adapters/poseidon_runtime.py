@@ -301,6 +301,24 @@ def _capture_inputs(trainer, calibration_data, helpers: dict[str, object], devic
     return capture
 
 
+def _compression_progress():
+    """Build a lazy terminal progress reporter for the sequential layer loop."""
+    progress_bar = None
+
+    def update(completed: int, total: int, layer_name: str) -> None:
+        nonlocal progress_bar
+        if progress_bar is None:
+            from tqdm.auto import tqdm
+
+            progress_bar = tqdm(total=total, desc="Compressing", unit="layer", dynamic_ncols=True)
+        progress_bar.set_postfix_str(layer_name[-56:], refresh=False)
+        progress_bar.update(completed - progress_bar.n)
+        if completed == total:
+            progress_bar.close()
+
+    return update
+
+
 def _load_or_collect_fisher(options: PoseidonOptions, trainer, calibration_data, helpers: dict[str, object]):
     if not options.use_fisher:
         return None
@@ -377,6 +395,7 @@ def run_poseidon(options: PoseidonOptions) -> Path:
         capture_inputs=_capture_inputs(trainer, calibration_data, helpers, options.device, options.fast),
         get_module=helpers["get_module_by_name"],
         set_module=helpers["set_module_by_name"],
+        progress=_compression_progress(),
     )
     trainer.set_ar_steps(None, output_all_steps=False)
     capture_batch_size = ORIGIN_CAPTURE_BATCH_SIZE if options.fast else SAFE_CAPTURE_BATCH_SIZE

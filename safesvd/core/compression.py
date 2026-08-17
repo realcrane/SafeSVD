@@ -18,6 +18,7 @@ CaptureInputs = Callable[[nn.Module, str], CapturedInputs]
 GetModule = Callable[[nn.Module, str], nn.Module]
 SetModule = Callable[[nn.Module, str, nn.Module], None]
 Checkpoint = Callable[[nn.Module, set[str]], None]
+Progress = Callable[[int, int, str], None]
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,7 @@ class CompressionCallbacks:
     get_module: GetModule
     set_module: SetModule
     checkpoint: Checkpoint | None = None
+    progress: Progress | None = None
 
 
 def _as_2d(inputs: torch.Tensor, in_features: int, device: torch.device) -> torch.Tensor:
@@ -73,17 +75,24 @@ def compress_sequentially(
     linear_names = [(name, layer) for name, layer in teacher.named_modules() if isinstance(layer, nn.Linear)]
     since_checkpoint = 0
 
-    for name, teacher_linear in linear_names:
+    total_layers = len(linear_names)
+    for layer_index, (name, teacher_linear) in enumerate(linear_names, start=1):
         if name in done:
+            if callbacks.progress is not None:
+                callbacks.progress(layer_index, total_layers, name)
             continue
         rank = ranks.get(name)
         if rank is None:
             done.add(name)
+            if callbacks.progress is not None:
+                callbacks.progress(layer_index, total_layers, name)
             continue
         rank = int(rank)
         in_features, out_features = teacher_linear.in_features, teacher_linear.out_features
         if rank < 1 or rank * (in_features + out_features) >= in_features * out_features:
             done.add(name)
+            if callbacks.progress is not None:
+                callbacks.progress(layer_index, total_layers, name)
             continue
 
         teacher_batches = _capture_batches(callbacks.capture_inputs(teacher, name))
@@ -124,6 +133,8 @@ def compress_sequentially(
         del teacher_batches, student_batches, sigma_hh, sigma_hphp, sigma_hph
         if target.type == "cuda":
             torch.cuda.empty_cache()
+        if callbacks.progress is not None:
+            callbacks.progress(layer_index, total_layers, name)
 
     if callbacks.checkpoint is not None:
         callbacks.checkpoint(student, done)
@@ -144,12 +155,17 @@ def compress_clean_input(
     target = torch.device(device)
     model = model.to(target).eval()
     layers = [(name, layer) for name, layer in model.named_modules() if isinstance(layer, nn.Linear)]
-    for name, original in layers:
+    total_layers = len(layers)
+    for layer_index, (name, original) in enumerate(layers, start=1):
         rank = ranks.get(name)
         if rank is None:
+            if callbacks.progress is not None:
+                callbacks.progress(layer_index, total_layers, name)
             continue
         rank = int(rank)
         if rank < 1 or rank * (original.in_features + original.out_features) >= original.in_features * original.out_features:
+            if callbacks.progress is not None:
+                callbacks.progress(layer_index, total_layers, name)
             continue
         if name not in input_whiteners:
             raise KeyError(f"input whitening is missing layer {name}")
@@ -159,4 +175,6 @@ def compress_clean_input(
         if not isinstance(current, nn.Linear):
             raise TypeError(f"{name} is no longer nn.Linear")
         callbacks.set_module(model, name, make_low_rank_linear(current, factors))
+        if callbacks.progress is not None:
+            callbacks.progress(layer_index, total_layers, name)
     return model.cpu()
