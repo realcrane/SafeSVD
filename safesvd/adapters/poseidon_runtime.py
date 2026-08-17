@@ -26,6 +26,13 @@ from safesvd.core import (
 )
 
 
+# These values reproduce MySVD_origin.  Keep them in the adapter rather than
+# changing Poseidon's own inference code.
+FISHER_BATCH_SIZE = 32
+ORIGIN_CAPTURE_BATCH_SIZE = 512
+SAFE_CAPTURE_BATCH_SIZE = 256
+
+
 @dataclass(frozen=True)
 class PoseidonOptions:
     repo_root: Path
@@ -216,6 +223,22 @@ def _imports(options: PoseidonOptions):
     }
 
 
+def _build_memory_safe_trainer(get_trainer, *, model_path: str, batch_size: int, dataset):
+    """Create the upstream trainer with MySVD_origin's data-loader settings.
+
+    Official Poseidon interprets ``workers=-1`` as every CPU assigned to the
+    job.  That is unsafe for downstream HDF5 data: the profiling rollout starts
+    one process per core immediately after Fisher collection and can exhaust
+    node memory.  The local ``poseidon_main`` fork used ``0`` workers.  The
+    official public factory requires a positive argument, so build with one
+    worker and set the returned Trainer arguments before any dataloader exists.
+    """
+    trainer = get_trainer(model_path=model_path, batch_size=batch_size, dataset=dataset, workers=1)
+    trainer.args.dataloader_num_workers = 0
+    trainer.args.remove_unused_columns = False
+    return trainer
+
+
 @torch.no_grad()
 def _profile_inputs(trainer, calibration_data, device: str, rollout) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
     """The MySVD_origin profiling pass, including its float32 Gram sums."""
@@ -259,7 +282,11 @@ def _capture_inputs(trainer, calibration_data, helpers: dict[str, object], devic
     """
     input_catch = helpers["input_catch"]
     as_2d_x = helpers["as_2d_x"]
-    batch_size = 1024 if fast else 512
+    # MySVD_origin uses 512.  The former 1024 setting was an invented shortcut
+    # and could double the retained prediction/capture footprint.  ``fast``
+    # therefore selects the origin-sized chunk; the non-fast route is smaller
+    # only to trade speed for headroom without changing the SVD objective.
+    batch_size = ORIGIN_CAPTURE_BATCH_SIZE if fast else SAFE_CAPTURE_BATCH_SIZE
 
     def capture(model: nn.Module, layer_name: str) -> torch.Tensor:
         module = helpers["get_module_by_name"](model, layer_name)
@@ -279,7 +306,8 @@ def _load_or_collect_fisher(options: PoseidonOptions, trainer, calibration_data,
         return None
     if options.fisher_path.is_file() and not options.overwrite:
         return torch.load(options.fisher_path, map_location="cpu")
-    loader = DataLoader(calibration_data, batch_size=32, shuffle=False)
+    print(f"Collecting Fisher: batch_size={FISHER_BATCH_SIZE}", flush=True)
+    loader = DataLoader(calibration_data, batch_size=FISHER_BATCH_SIZE, shuffle=False)
     constants = calibration_data.constants
     kwargs = {
         "gradient_loss": options.gradient_loss,
@@ -290,7 +318,10 @@ def _load_or_collect_fisher(options: PoseidonOptions, trainer, calibration_data,
     }
     if options.use_prev_time:
         fisher = helpers["collect_fisher_dict_time_sob"](
-            trainer, options.dataset, loader, DataLoader(PrevTimeDataset(calibration_data), batch_size=32, shuffle=False),
+            trainer,
+            options.dataset,
+            loader,
+            DataLoader(PrevTimeDataset(calibration_data), batch_size=FISHER_BATCH_SIZE, shuffle=False),
             options.device, **kwargs,
         )
     else:
@@ -320,18 +351,23 @@ def run_poseidon(options: PoseidonOptions) -> Path:
         max_num_time_steps=target_time,
     )
     print("Calibration selection:", describe_calibration_selection(calibration_data, options.random_calibration))
-    trainer = helpers["get_trainer"](model_path=str(options.model_path), batch_size=256, dataset=calibration_data)
+    print("Building Poseidon trainer: eval_batch_size=256, dataloader_workers=0", flush=True)
+    trainer = _build_memory_safe_trainer(
+        helpers["get_trainer"], model_path=str(options.model_path), batch_size=256, dataset=calibration_data
+    )
 
     fisher = _load_or_collect_fisher(options, trainer, calibration_data, helpers)
     if options.profile_path.is_file() and not options.overwrite:
         profile = torch.load(options.profile_path, map_location="cpu")
     else:
+        print("Profiling activations: eval_batch_size=256, dataloader_workers=0", flush=True)
         profile = _profile_inputs(trainer, calibration_data, options.device, helpers["rollout"])
         options.profile_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(profile, options.profile_path)
     if options.rank_path.is_file() and not options.overwrite:
         ranks = json.loads(options.rank_path.read_text())
     else:
+        print("Selecting ranks from Fisher and activation profiles", flush=True)
         ranks = allocate_greedy_ranks(trainer.model, fisher, profile, options.rank_ratio, options.device)
         options.rank_path.parent.mkdir(parents=True, exist_ok=True)
         options.rank_path.write_text(json.dumps(ranks, indent=2) + "\n")
@@ -343,6 +379,8 @@ def run_poseidon(options: PoseidonOptions) -> Path:
         set_module=helpers["set_module_by_name"],
     )
     trainer.set_ar_steps(None, output_all_steps=False)
+    capture_batch_size = ORIGIN_CAPTURE_BATCH_SIZE if options.fast else SAFE_CAPTURE_BATCH_SIZE
+    print(f"Compressing layers: capture_batch_size={capture_batch_size}", flush=True)
     if options.alpha == 0:
         model = compress_clean_input(
             trainer.model, ranks, profile, callbacks, device=options.device, left_whiteners=fisher,

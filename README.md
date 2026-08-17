@@ -69,8 +69,9 @@ python -m safesvd.cli compress \
   --fast
 ```
 
-Pass `--fast` after the separator to use larger activation-capture chunks; it
-does not change the MySVD objective. Persistent artifacts are backend-scoped:
+Pass `--fast` after the separator to use MySVD_origin's 512-sample
+activation-capture chunk; without it SAFE-SVD uses 256 for lower peak memory.
+Neither choice changes the MySVD objective. Persistent artifacts are backend-scoped:
 `ranks/poseidon/`, `cache/poseidon/`, and the run-local `compressed/` folder.
 Future routes use the equivalent `ranks/vicon`, `ranks/mpp`, `cache/vicon`,
 and `cache/mpp` roots. SAFE-SVD imports only public `scOT.*` modules and keeps

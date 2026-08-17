@@ -32,7 +32,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--order_control", type=int, default=2)
     result.add_argument("--gradient_loss", choices=("mse", "l1", "smooth_l1"), default="l1")
     result.add_argument("--alpha", type=float, default=0.7)
-    result.add_argument("--fast", action="store_true", help="Use larger activation-capture chunks without changing MySVD math.")
+    result.add_argument(
+        "--fast",
+        action="store_true",
+        help="Use MySVD_origin's 512-sample activation-capture chunk (the memory-safe default is 256).",
+    )
     result.add_argument("--overwrite_cache", action="store_true")
     return result
 
