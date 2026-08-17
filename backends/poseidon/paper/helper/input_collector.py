@@ -11,9 +11,10 @@ import torch.nn as nn
 from tqdm import tqdm
 from safesvd.core.whitening import svd_whitener
 
-# Poseidon / ScOT 依赖（仅用于取数据与构建 trainer；不做任何 whitening/profiling）
-from poseidon.scOT.inference import get_trainer, rollout
-from poseidon.scOT.problems.base import get_dataset
+# Poseidon / ScOT 依赖（仅用于执行官方 rollout；不做任何 whitening/profiling）。
+# The upstream project exports ``scOT`` directly.  Keeping this import on the
+# public package name lets SAFE-SVD work with an untouched Poseidon checkout.
+from scOT.inference import rollout
 
 current_path = os.path.dirname(os.path.abspath(__file__))
 parent_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -49,7 +50,7 @@ def quiet_everything():
     loggers = [
         logging.getLogger(),                         # root
         logging.getLogger("transformers"),
-        logging.getLogger("poseidon"),          # 你项目里的 logger（如果有）
+        logging.getLogger("scOT"),                   # upstream Poseidon logger
     ]
     old_levels = [lg.level for lg in loggers]
     for lg in loggers:
@@ -182,7 +183,7 @@ def linear_forward_order(trainer, calib_dataset) -> List[str]:
         else:
             _ = model(batch)
     except Exception:
-        _ = rollout(trainer, calib_dataset, model_path=getattr(trainer.model.config, 'name_or_path', ''))
+        _ = rollout(trainer, calib_dataset)
 
     for h in hooks:
         h.remove()
@@ -311,7 +312,7 @@ def forward_until_via_rollout(trainer, module_name: str, dataset, device: torch.
     try:
         with disable_ar_steps(trainer), swallow_stop_and_mute_metrics(trainer), quiet_everything():
             # 关键：一次 rollout 覆盖整个 dataset（就是你测评用的那条路）
-            _ = rollout(trainer, dataset, model_path=getattr(trainer.model.config, 'name_or_path', ''))
+            _ = rollout(trainer, dataset)
     finally:
         h.remove()
 
@@ -439,7 +440,7 @@ def input_catch(trainer, model, module_name, calib_dataset, device, eps=1e-4, ag
         h = target.register_forward_pre_hook(pre)
         try:
             with disable_ar_steps(trainer), swallow_stop_and_mute_metrics(trainer), quiet_everything():
-                _ = rollout(trainer, ds, model_path=getattr(trainer.model.config,'name_or_path',''))
+                _ = rollout(trainer, ds)
         finally:
             h.remove()
         return xs if aggregate=="list" else torch.cat(xs, dim=0)
@@ -461,7 +462,7 @@ def forward_until_via_rollout_jxs(trainer, module_name, calib_dataset, device, e
         h = target.register_forward_pre_hook(pre)
         try:
             with disable_ar_steps(trainer), swallow_stop_and_mute_metrics(trainer), quiet_everything():
-                _ = rollout(trainer, ds, model_path=getattr(trainer.model.config,'name_or_path',''))
+                _ = rollout(trainer, ds)
         finally:
             h.remove()
         return xs if aggregate=="list" else torch.cat(xs, dim=0)
@@ -777,7 +778,7 @@ def profile_inputs_only(
             # 这里的 rollout 只做前向推理，不涉及任何 loss 计算或反向传播
             # 也不涉及 patch_collator 的修改
             with disable_ar_steps(trainer), swallow_stop_and_mute_metrics(trainer), quiet_everything():
-                _ = rollout(trainer, calib_loader, model_path=getattr(trainer.model.config, 'name_or_path', ''))
+                _ = rollout(trainer, calib_loader)
         finally:
             for h in handles:
                 h.remove()

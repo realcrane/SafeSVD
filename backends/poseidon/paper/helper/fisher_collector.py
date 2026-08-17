@@ -4,7 +4,6 @@ from typing import Dict, Optional, Tuple
 import torch.nn.functional as F
 from safesvd.core.whitening import fisher_cholesky_whitener, svd_whitener
 from tqdm import tqdm
-from poseidon.scOT.problems.fluids.normalization_constants import CONSTANTS
 
 def sobolev_loss_calc_denorm(dataset_name, pred, labels, order_control, base_loss_val, 
                             loss_func, device, constants,

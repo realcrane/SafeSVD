@@ -171,12 +171,23 @@ def _prepend_import_path(path: Path) -> None:
 
 
 def _imports(options: PoseidonOptions):
-    """Import runtime dependencies only after the upstream source path is known."""
-    _prepend_import_path(options.repo_root)
+    """Import the unmodified upstream ScOT package and SAFE compatibility code.
+
+    ``poseidon_root`` is deliberately a checkout of camlab-ethz/poseidon, whose
+    public Python package is named ``scOT``.  SAFE-SVD must never import the
+    research-only ``poseidon_main`` fork: doing so would make compression depend
+    on local edits to the upstream repository.
+    """
+    if not (options.poseidon_root / "scOT").is_dir():
+        raise FileNotFoundError(
+            "Poseidon source checkout must contain scOT/. Clone the unmodified "
+            "https://github.com/camlab-ethz/poseidon repository into "
+            f"{options.poseidon_root}."
+        )
     _prepend_import_path(options.poseidon_root)
     try:
-        from poseidon.scOT.inference import get_trainer, rollout
-        from poseidon.scOT.problems.base import get_dataset
+        from scOT.inference import get_trainer, rollout
+        from scOT.problems.base import get_dataset
         from backends.poseidon.paper.helper.fisher_collector import (
             collect_fisher_dict_linear_only,
             collect_fisher_dict_time_sob,
@@ -225,7 +236,7 @@ def _profile_inputs(trainer, calibration_data, device: str, rollout) -> dict[str
             handles.append(module.register_forward_hook(hook))
             layers.append((name, module))
     try:
-        rollout(trainer, calibration_data, model_path=trainer.model.config.name_or_path)
+        rollout(trainer, calibration_data)
     finally:
         for handle in handles:
             handle.remove()

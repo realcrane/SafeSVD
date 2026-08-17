@@ -2,8 +2,16 @@
 
 ## Prepare.
 ### Repo. clone
-Before downloads, please git clone Poseidon, VICON and MPP repos unde SAFE-SVD.
-Make sure the structure is SAFE-SVD/poseidon_main/, SAFE-SVD/vicon/ and SAFE-SVD/mpp/
+Before downloads, clone Poseidon, VICON and MPP repositories under SAFE-SVD.
+For Poseidon, use an unmodified checkout of the official repository; do not
+reuse the local `poseidon_main` research fork:
+
+```bash
+git clone https://github.com/camlab-ethz/poseidon.git poseidon
+```
+
+The resulting structure is `SAFE-SVD/poseidon/`, `SAFE-SVD/vicon/`, and
+`SAFE-SVD/mpp/`.
 
 ### Environment
 ```bash
@@ -32,22 +40,42 @@ python downloads/model_download.py
 
 ## Poseidon compression
 
-Place the upstream Poseidon checkout at `poseidon/`, downstream data at
-`poseidon/camlab-ethz/down_streams/`, and the fine-tuned checkpoint under
-`models/poseidon/`. Then start an origin-compatible run directly:
+Place the unmodified upstream Poseidon checkout at `poseidon/`, downstream data
+at `poseidon/camlab-ethz/down_streams/`, and use the *concrete* fine-tuned
+checkpoint directory as `--checkpoint`.  That directory must contain
+`config.json` (passing the parent `models/poseidon/` directory is not enough).
+
+Install both packages once in the same Poseidon environment:
 
 ```bash
-safe-svd compress --model poseidon --rank-ratio 0.2 --calibration-size 64 -- \
-  --dataset fluids.incompressible.PiecewiseConstants --model_name Poseidon-L
+cd /path/to/SAFE-SVD-v0
+python -m pip install -e ./poseidon
+python -m pip install -e .
+```
+
+Then launch compression with that environment's `python`:
+
+```bash
+cd /path/to/SAFE-SVD-v0
+python -m safesvd.cli compress \
+  --model poseidon \
+  --checkpoint /path/to/models/poseidon/Poseidon-L-finetuned \
+  --data-root /path/to/SAFE-SVD-v0/poseidon/camlab-ethz/down_streams \
+  --rank-ratio 0.2 \
+  --calibration-size 64 \
+  -- \
+  --dataset fluids.incompressible.PiecewiseConstants \
+  --model_name Poseidon-L \
+  --fast
 ```
 
 Pass `--fast` after the separator to use larger activation-capture chunks; it
 does not change the MySVD objective. Persistent artifacts are backend-scoped:
 `ranks/poseidon/`, `cache/poseidon/`, and the run-local `compressed/` folder.
 Future routes use the equivalent `ranks/vicon`, `ranks/mpp`, `cache/vicon`,
-and `cache/mpp` roots. Run this command in the Poseidon Python environment.
-If that environment is not active, set `SAFE_SVD_RUNTIME_PYTHON` to its
-interpreter path before running `safe-svd`.
+and `cache/mpp` roots. SAFE-SVD imports only public `scOT.*` modules and keeps
+all Fisher, calibration, rank-selection, and low-rank replacement code inside
+SAFE-SVD; the `poseidon/` source tree is never edited.
 
 <!-- SAFE-SVD is a unified, reproducible interface for applying SVD-based
 compression to three scientific foundation models:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import os
+import sys
 from pathlib import Path
 
 from safesvd.adapters.base import Adapter, RunRequest
@@ -13,7 +13,9 @@ class PoseidonAdapter(Adapter):
     def validate(self, request: RunRequest) -> None:
         require_existing(request.assets.resolved_model_path, "Poseidon model path")
         require_existing(request.assets.resolved_data_root, "Poseidon data root")
-        require_existing(request.repo_root / "poseidon", "Poseidon source checkout")
+        poseidon_root = request.repo_root / "poseidon"
+        require_existing(poseidon_root, "Poseidon source checkout")
+        require_existing(poseidon_root / "scOT", "Unmodified Poseidon scOT package")
 
     def working_directory(self, request: RunRequest) -> Path:
         # Run from SAFE-SVD's root so per-backend cache roots remain stable.
@@ -22,7 +24,10 @@ class PoseidonAdapter(Adapter):
     def command(self, request: RunRequest) -> list[str]:
         poseidon_root = request.repo_root / "poseidon"
         artifacts = BackendArtifactLayout(request.repo_root, self.name)
-        runtime_python = os.environ.get("SAFE_SVD_RUNTIME_PYTHON", "python3")
+        # Use the interpreter that launched ``python -m safesvd.cli``.  This
+        # keeps the adapter in the active Poseidon environment without asking
+        # users to set a second interpreter path.
+        runtime_python = sys.executable
         return [
             runtime_python, "-u", "-m", "safesvd.adapters.poseidon_runner",
             "--repo-root", str(request.repo_root),
