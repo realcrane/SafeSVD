@@ -27,9 +27,10 @@ Please refer to mpp repo for the downloading. (wait to try again)
 ## Foundation and Finetuned Model Downloads
 We have totally n finetuned poseidon models, and one VICON and MPP foundation model for user to easy strat compression. Please run the command below for downloads.
 ```python
-python ...
+python downloads/model_download.py
 ```
 
+## 
 <!-- SAFE-SVD is a unified, reproducible interface for applying SVD-based
 compression to three scientific foundation models:
 

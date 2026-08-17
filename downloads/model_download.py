@@ -24,7 +24,7 @@ REPO_ID = "Evave7/SAFE-SVD"
 POSEIDON_PREFIX = "poseidon/Poseidon-L/"
 STATIC_FILES = {
     "VICON/model.pth": Path("VICON/model.pth"),
-    "MPP/MPP_AViT_L": Path("MPP/model"),
+    "MPP/model": Path("MPP/MPP_AViT_L"),
 }
 
 

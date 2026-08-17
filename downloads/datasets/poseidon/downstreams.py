@@ -4,9 +4,7 @@ from pathlib import Path
 
 # Download
 datasets = [
-    # "NS-PwC", "NS-SVS", "NS-BB", "NS-SL", "FNS-KF", "CE-RPUI", "CE-RM",
-    # "SE-AF", "GCE-RT", "Wave-Layer", "Wave-Gauss", "ACE", 
-    "Poisson-Gauss", "Helmholtz"
+    "NS-PwC", "NS-BB", "CE-RPUI", "CE-RM", "Wave-Layer", "Wave-Gauss"
 ]
 
 for name in datasets:
@@ -14,14 +12,14 @@ for name in datasets:
     snapshot_download(
         repo_id=repo_id,
         repo_type="dataset",
-        local_dir=f"poseidon_main/camlab-ethz/down_streams/{name}",
+        local_dir=f"poseidon/camlab-ethz/down_streams/{name}",
         local_dir_use_symlinks=False
     )
 
 # Assemble
 for dataset in datasets:
-    assemble_script = f"poseidon_main/camlab-ethz/down_streams/{dataset}/assemble_data.py" 
-    input_dir = f"poseidon_main/camlab-ethz/down_streams/{dataset}"
+    assemble_script = f"poseidon/camlab-ethz/down_streams/{dataset}/assemble_data.py" 
+    input_dir = f"poseidon/camlab-ethz/down_streams/{dataset}"
     output_file = f"{input_dir}.nc"
 
     if not Path(input_dir).exists():

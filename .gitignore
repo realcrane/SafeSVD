@@ -22,4 +22,10 @@ __pycache__/
 .env
 hf_token
 
+# Models
 models/
+
+# Repos.
+poseidon/
+VICON/
+multiple_physics_pretraining/
