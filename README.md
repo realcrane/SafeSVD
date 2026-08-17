@@ -30,7 +30,25 @@ We have totally n finetuned poseidon models, and one VICON and MPP foundation mo
 python downloads/model_download.py
 ```
 
-## 
+## Poseidon compression
+
+Place the upstream Poseidon checkout at `poseidon/`, downstream data at
+`poseidon/camlab-ethz/down_streams/`, and the fine-tuned checkpoint under
+`models/poseidon/`. Then start an origin-compatible run directly:
+
+```bash
+safe-svd compress --model poseidon --rank-ratio 0.2 --calibration-size 64 -- \
+  --dataset fluids.incompressible.PiecewiseConstants --model_name Poseidon-L
+```
+
+Pass `--fast` after the separator to use larger activation-capture chunks; it
+does not change the MySVD objective. Persistent artifacts are backend-scoped:
+`ranks/poseidon/`, `cache/poseidon/`, and the run-local `compressed/` folder.
+Future routes use the equivalent `ranks/vicon`, `ranks/mpp`, `cache/vicon`,
+and `cache/mpp` roots. Run this command in the Poseidon Python environment.
+If that environment is not active, set `SAFE_SVD_RUNTIME_PYTHON` to its
+interpreter path before running `safe-svd`.
+
 <!-- SAFE-SVD is a unified, reproducible interface for applying SVD-based
 compression to three scientific foundation models:
 

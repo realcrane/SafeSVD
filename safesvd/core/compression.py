@@ -1,0 +1,162 @@
+"""Backend-neutral sequential MySVD compression orchestration."""
+
+from __future__ import annotations
+
+import copy
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Union
+
+import torch
+import torch.nn as nn
+
+from .factorization import clean_input_factors, combined_input_factors, make_low_rank_linear
+
+
+CapturedInputs = Union[torch.Tensor, Sequence[torch.Tensor]]
+CaptureInputs = Callable[[nn.Module, str], CapturedInputs]
+GetModule = Callable[[nn.Module, str], nn.Module]
+SetModule = Callable[[nn.Module, str, nn.Module], None]
+Checkpoint = Callable[[nn.Module, set[str]], None]
+
+
+@dataclass(frozen=True)
+class CompressionCallbacks:
+    """Operations supplied by a model adapter to the generic compressor."""
+
+    capture_inputs: CaptureInputs
+    get_module: GetModule
+    set_module: SetModule
+    checkpoint: Checkpoint | None = None
+
+
+def _as_2d(inputs: torch.Tensor, in_features: int, device: torch.device) -> torch.Tensor:
+    if not torch.is_tensor(inputs):
+        raise TypeError("adapter input capture must return a tensor")
+    if inputs.shape[-1] != in_features:
+        raise ValueError(f"captured input has final dimension {inputs.shape[-1]}, expected {in_features}")
+    return inputs.detach().reshape(-1, in_features).to(device=device, dtype=torch.float64)
+
+
+def _capture_batches(inputs: CapturedInputs) -> tuple[torch.Tensor, ...]:
+    if torch.is_tensor(inputs):
+        return (inputs,)
+    if not inputs:
+        raise ValueError("adapter input capture returned no batches")
+    return tuple(inputs)
+
+
+@torch.no_grad()
+def compress_sequentially(
+    teacher: nn.Module,
+    ranks: Mapping[str, int | None],
+    callbacks: CompressionCallbacks,
+    *,
+    device: str | torch.device,
+    alpha: float,
+    left_whiteners: Mapping[str, tuple[torch.Tensor, torch.Tensor]] | None = None,
+    eps: float = 1e-6,
+    checkpoint_every: int | None = None,
+    initial_student: nn.Module | None = None,
+    compressed_layers: set[str] | None = None,
+) -> nn.Module:
+    """Run MySVD_origin's teacher/student, layer-by-layer compression loop.
+
+    The adapter capture function is intentionally invoked separately for the
+    teacher and current student, matching the original algorithm's sequential
+    distribution shift rather than reusing stale activations.
+    """
+    target = torch.device(device)
+    teacher = teacher.to(target).eval()
+    student = (initial_student if initial_student is not None else copy.deepcopy(teacher)).to(target).eval()
+    done = set() if compressed_layers is None else set(compressed_layers)
+    linear_names = [(name, layer) for name, layer in teacher.named_modules() if isinstance(layer, nn.Linear)]
+    since_checkpoint = 0
+
+    for name, teacher_linear in linear_names:
+        if name in done:
+            continue
+        rank = ranks.get(name)
+        if rank is None:
+            done.add(name)
+            continue
+        rank = int(rank)
+        in_features, out_features = teacher_linear.in_features, teacher_linear.out_features
+        if rank < 1 or rank * (in_features + out_features) >= in_features * out_features:
+            done.add(name)
+            continue
+
+        teacher_batches = _capture_batches(callbacks.capture_inputs(teacher, name))
+        student_batches = _capture_batches(callbacks.capture_inputs(student, name))
+        if len(teacher_batches) != len(student_batches):
+            raise ValueError(f"teacher/student capture batch count differs for {name}")
+        sigma_hh = torch.zeros((in_features, in_features), device=target, dtype=torch.float64)
+        sigma_hphp = torch.zeros_like(sigma_hh)
+        sigma_hph = torch.zeros_like(sigma_hh)
+        for teacher_batch, student_batch in zip(teacher_batches, student_batches):
+            teacher_inputs = _as_2d(teacher_batch, in_features, target)
+            student_inputs = _as_2d(student_batch, in_features, target)
+            if teacher_inputs.shape[0] != student_inputs.shape[0]:
+                raise ValueError(f"teacher/student capture count differs for {name}")
+            sigma_hh.addmm_(teacher_inputs.T, teacher_inputs)
+            sigma_hphp.addmm_(student_inputs.T, student_inputs)
+            sigma_hph.addmm_(teacher_inputs.T, student_inputs)
+        left = None if left_whiteners is None else left_whiteners.get(name)
+        factors = combined_input_factors(
+            teacher_linear.weight,
+            sigma_hh,
+            sigma_hph,
+            sigma_hphp,
+            rank,
+            alpha=alpha,
+            left_whitener=left,
+            eps=eps,
+        )
+        current = callbacks.get_module(student, name)
+        if not isinstance(current, nn.Linear):
+            raise TypeError(f"{name} is no longer nn.Linear in the student model")
+        callbacks.set_module(student, name, make_low_rank_linear(current, factors))
+        done.add(name)
+        since_checkpoint += 1
+        if callbacks.checkpoint is not None and checkpoint_every and since_checkpoint >= checkpoint_every:
+            callbacks.checkpoint(student, done)
+            since_checkpoint = 0
+        del teacher_batches, student_batches, sigma_hh, sigma_hphp, sigma_hph
+        if target.type == "cuda":
+            torch.cuda.empty_cache()
+
+    if callbacks.checkpoint is not None:
+        callbacks.checkpoint(student, done)
+    return student.cpu()
+
+
+@torch.no_grad()
+def compress_clean_input(
+    model: nn.Module,
+    ranks: Mapping[str, int | None],
+    input_whiteners: Mapping[str, tuple[torch.Tensor, torch.Tensor]],
+    callbacks: CompressionCallbacks,
+    *,
+    device: str | torch.device,
+    left_whiteners: Mapping[str, tuple[torch.Tensor, torch.Tensor]] | None = None,
+) -> nn.Module:
+    """Run the exact static clean-input route selected by ``alpha == 0``."""
+    target = torch.device(device)
+    model = model.to(target).eval()
+    layers = [(name, layer) for name, layer in model.named_modules() if isinstance(layer, nn.Linear)]
+    for name, original in layers:
+        rank = ranks.get(name)
+        if rank is None:
+            continue
+        rank = int(rank)
+        if rank < 1 or rank * (original.in_features + original.out_features) >= original.in_features * original.out_features:
+            continue
+        if name not in input_whiteners:
+            raise KeyError(f"input whitening is missing layer {name}")
+        left = None if left_whiteners is None else left_whiteners.get(name)
+        factors = clean_input_factors(original.weight, input_whiteners[name], rank, left_whitener=left)
+        current = callbacks.get_module(model, name)
+        if not isinstance(current, nn.Linear):
+            raise TypeError(f"{name} is no longer nn.Linear")
+        callbacks.set_module(model, name, make_low_rank_linear(current, factors))
+    return model.cpu()

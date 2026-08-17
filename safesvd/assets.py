@@ -33,6 +33,28 @@ class AssetLayout:
         return self.data_root or self.assets_dir / "data" / self.model
 
 
+@dataclass(frozen=True)
+class BackendArtifactLayout:
+    """Persistent, backend-scoped caches shared across SAFE-SVD runs.
+
+    Compression outputs remain run-local, while rank and profiling/Fisher
+    artifacts are organised as ``ranks/{backend}`` and ``cache/{backend}``.
+    This avoids accidental reuse across model families with incompatible layer
+    names and will be shared by the VICON and MPP adapters.
+    """
+
+    repo_root: Path
+    backend: str
+
+    @property
+    def rank_root(self) -> Path:
+        return self.repo_root / "ranks" / self.backend
+
+    @property
+    def cache_root(self) -> Path:
+        return self.repo_root / "cache" / self.backend
+
+
 def require_existing(path: Path, label: str) -> None:
     if not path.exists():
         raise FileNotFoundError(

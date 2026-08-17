@@ -19,8 +19,8 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     compress_parser = commands.add_parser("compress", help="select ranks and compress a model")
     compress_parser.add_argument("--model", choices=("poseidon", "vicon", "mpp"), required=True)
-    compress_parser.add_argument("--checkpoint", type=Path, required=True)
-    compress_parser.add_argument("--data-root", type=Path, required=True)
+    compress_parser.add_argument("--checkpoint", type=Path)
+    compress_parser.add_argument("--data-root", type=Path)
     compress_parser.add_argument("--output-dir", type=Path)
     compress_parser.add_argument("--rank-ratio", type=float, required=True)
     compress_parser.add_argument("--calibration-size", type=int, required=True)
@@ -48,10 +48,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.command != "compress":
         raise AssertionError(f"Unhandled command: {args.command}")
     extra = tuple(args.extra[1:] if args.extra[:1] == ["--"] else args.extra)
+    checkpoint = args.checkpoint or PROJECT_DIR / "models" / args.model
+    default_data_root = (
+        PROJECT_DIR / "poseidon" / "camlab-ethz" / "down_streams"
+        if args.model == "poseidon"
+        else PROJECT_DIR / "data" / args.model
+    )
     config = SafeSVDConfig(
         model=args.model,
-        checkpoint=args.checkpoint,
-        data_root=args.data_root,
+        checkpoint=checkpoint,
+        data_root=args.data_root or default_data_root,
         output_dir=args.output_dir or default_output_dir(args.model),
         rank_ratio=args.rank_ratio,
         calibration_size=args.calibration_size,
