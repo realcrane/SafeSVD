@@ -35,7 +35,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--fast",
         action="store_true",
-        help="Use MySVD_origin's 512-sample activation-capture chunk (the memory-safe default is 256).",
+        help="Deprecated compatibility flag; Poseidon compression always uses MySVD_fast's 512-sample capture chunk.",
     )
     result.add_argument("--overwrite_cache", action="store_true")
     return result

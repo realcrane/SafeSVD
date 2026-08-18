@@ -33,6 +33,24 @@ class CoreMathTest(unittest.TestCase):
         self.assertTrue(torch.allclose(factors.left, expected_left.float(), atol=1e-5))
         self.assertTrue(torch.allclose(factors.right, expected_right.float(), atol=1e-5))
 
+    def test_consuming_combined_factors_match_standard_route(self) -> None:
+        from safesvd.core.factorization import combined_input_factors, combined_input_factors_consuming
+
+        torch.manual_seed(23)
+        weight = torch.randn(5, 4)
+        hh = torch.randn(4, 4)
+        hh = hh.T @ hh
+        hphp = torch.randn(4, 4)
+        hphp = hphp.T @ hphp
+        hph = torch.randn(4, 4)
+        expected = combined_input_factors(weight, hh, hph, hphp, 2, alpha=0.7)
+        statistics = {"hh": hh.clone(), "hph": hph.clone(), "hphp": hphp.clone()}
+        actual = combined_input_factors_consuming(weight, statistics, 2, alpha=0.7)
+
+        self.assertEqual(statistics, {})
+        self.assertTrue(torch.allclose(actual.left, expected.left, atol=1e-5))
+        self.assertTrue(torch.allclose(actual.right, expected.right, atol=1e-5))
+
     def test_rank_allocator_returns_origin_rank_convention(self) -> None:
         from safesvd.core.ranks import allocate_greedy_ranks
 

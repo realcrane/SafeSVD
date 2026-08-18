@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import random
 import sys
+import gc
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,7 +31,6 @@ from safesvd.core import (
 # changing Poseidon's own inference code.
 FISHER_BATCH_SIZE = 32
 ORIGIN_CAPTURE_BATCH_SIZE = 512
-SAFE_CAPTURE_BATCH_SIZE = 256
 
 
 @dataclass(frozen=True)
@@ -274,19 +274,14 @@ def _profile_inputs(trainer, calibration_data, device: str, rollout) -> dict[str
 
 
 def _capture_inputs(trainer, calibration_data, helpers: dict[str, object], device: str, fast: bool):
-    """Return a core callback that reproduces origin's 512-sample capture loop.
+    """Return a compatibility callback using MySVD_fast's 512-sample chunk.
 
-    ``fast`` changes only the subset size.  The accumulated sufficient
-    statistics are unchanged, so it is a performance parameter rather than a
-    different compression objective.
+    The paired callback below is used by Poseidon compression.  This callback
+    remains for the backend-neutral fallback path.
     """
     input_catch = helpers["input_catch"]
     as_2d_x = helpers["as_2d_x"]
-    # MySVD_origin uses 512.  The former 1024 setting was an invented shortcut
-    # and could double the retained prediction/capture footprint.  ``fast``
-    # therefore selects the origin-sized chunk; the non-fast route is smaller
-    # only to trade speed for headroom without changing the SVD objective.
-    batch_size = ORIGIN_CAPTURE_BATCH_SIZE if fast else SAFE_CAPTURE_BATCH_SIZE
+    batch_size = ORIGIN_CAPTURE_BATCH_SIZE
 
     def capture(model: nn.Module, layer_name: str) -> torch.Tensor:
         module = helpers["get_module_by_name"](model, layer_name)
@@ -299,6 +294,45 @@ def _capture_inputs(trainer, calibration_data, helpers: dict[str, object], devic
         return tuple(inputs)
 
     return capture
+
+
+def _capture_input_pairs(trainer, calibration_data, helpers: dict[str, object], device: str):
+    """Yield one MySVD_fast-style teacher/student capture pair at a time.
+
+    This avoids retaining all teacher chunks and then all student chunks before
+    covariance accumulation.  At most one 512-sample pair is live at once.
+    """
+    input_catch = helpers["input_catch"]
+    as_2d_x = helpers["as_2d_x"]
+    target = torch.device(device)
+
+    def capture_pairs(teacher: nn.Module, student: nn.Module, layer_name: str):
+        teacher_module = helpers["get_module_by_name"](teacher, layer_name)
+        student_module = helpers["get_module_by_name"](student, layer_name)
+        if not isinstance(teacher_module, nn.Linear) or not isinstance(student_module, nn.Linear):
+            raise TypeError(f"{layer_name} is expected to be nn.Linear in both teacher and student")
+        for start in range(0, len(calibration_data), ORIGIN_CAPTURE_BATCH_SIZE):
+            stop = min(start + ORIGIN_CAPTURE_BATCH_SIZE, len(calibration_data))
+            subset = Subset(calibration_data, list(range(start, stop)))
+            teacher_inputs = input_catch(trainer, teacher, layer_name, subset, target)
+            student_inputs = input_catch(trainer, student, layer_name, subset, target)
+            yield (
+                as_2d_x(teacher_inputs, teacher_module.in_features).cpu(),
+                as_2d_x(student_inputs, student_module.in_features).cpu(),
+            )
+            del teacher_inputs, student_inputs, subset
+            if target.type == "cuda":
+                torch.cuda.empty_cache()
+
+    return capture_pairs
+
+
+def _release_cuda_stage(trainer, device: str) -> None:
+    """Approximate MySVD_fast's fresh-process boundary between stages."""
+    trainer.model.cpu()
+    gc.collect()
+    if torch.device(device).type == "cuda":
+        torch.cuda.empty_cache()
 
 
 def _compression_progress():
@@ -375,6 +409,7 @@ def run_poseidon(options: PoseidonOptions) -> Path:
     )
 
     fisher = _load_or_collect_fisher(options, trainer, calibration_data, helpers)
+    _release_cuda_stage(trainer, options.device)
     if options.profile_path.is_file() and not options.overwrite:
         profile = torch.load(options.profile_path, map_location="cpu")
     else:
@@ -382,6 +417,7 @@ def run_poseidon(options: PoseidonOptions) -> Path:
         profile = _profile_inputs(trainer, calibration_data, options.device, helpers["rollout"])
         options.profile_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(profile, options.profile_path)
+    _release_cuda_stage(trainer, options.device)
     if options.rank_path.is_file() and not options.overwrite:
         ranks = json.loads(options.rank_path.read_text())
     else:
@@ -389,16 +425,40 @@ def run_poseidon(options: PoseidonOptions) -> Path:
         ranks = allocate_greedy_ranks(trainer.model, fisher, profile, options.rank_ratio, options.device)
         options.rank_path.parent.mkdir(parents=True, exist_ok=True)
         options.rank_path.write_text(json.dumps(ranks, indent=2) + "\n")
+    _release_cuda_stage(trainer, options.device)
 
     options.save_path.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = options.save_path / "compressing_model.pt"
+    total_linear_layers = sum(1 for module in trainer.model.modules() if isinstance(module, nn.Linear))
+    checkpoint_every = max(int(total_linear_layers * 0.1), 1)
+    initial_student = None
+    compressed_layers = None
+    if options.alpha != 0 and checkpoint_path.is_file() and not options.overwrite:
+        checkpoint_payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        initial_student = checkpoint_payload["model"]
+        compressed_layers = set(checkpoint_payload["compressed_layers"])
+        print(f"Resuming compression after {len(compressed_layers)} completed layers", flush=True)
+
+    def checkpoint(student: nn.Module, compressed_layers: set[str]) -> None:
+        """Mirror MySVD_fast's periodic CPU checkpoint and CUDA defragmentation."""
+        torch.save(
+            {"model": student.cpu(), "compressed_layers": sorted(compressed_layers)},
+            checkpoint_path,
+        )
+        student.to(options.device)
+        if torch.device(options.device).type == "cuda":
+            torch.cuda.empty_cache()
+
     callbacks = CompressionCallbacks(
         capture_inputs=_capture_inputs(trainer, calibration_data, helpers, options.device, options.fast),
+        capture_pairs=_capture_input_pairs(trainer, calibration_data, helpers, options.device),
         get_module=helpers["get_module_by_name"],
         set_module=helpers["set_module_by_name"],
+        checkpoint=checkpoint,
         progress=_compression_progress(),
     )
     trainer.set_ar_steps(None, output_all_steps=False)
-    capture_batch_size = ORIGIN_CAPTURE_BATCH_SIZE if options.fast else SAFE_CAPTURE_BATCH_SIZE
+    capture_batch_size = ORIGIN_CAPTURE_BATCH_SIZE
     print(f"Compressing layers: capture_batch_size={capture_batch_size}", flush=True)
     if options.alpha == 0:
         model = compress_clean_input(
@@ -406,8 +466,18 @@ def run_poseidon(options: PoseidonOptions) -> Path:
         )
     else:
         model = compress_sequentially(
-            trainer.model, ranks, callbacks, device=options.device, alpha=options.alpha, left_whiteners=fisher,
+            trainer.model,
+            ranks,
+            callbacks,
+            device=options.device,
+            alpha=options.alpha,
+            left_whiteners=fisher,
+            checkpoint_every=checkpoint_every,
+            initial_student=initial_student,
+            compressed_layers=compressed_layers,
         )
     final_path = options.save_path / "compressed_model_origin.pt"
     torch.save(model, final_path)
+    if checkpoint_path.exists():
+        checkpoint_path.unlink()
     return final_path

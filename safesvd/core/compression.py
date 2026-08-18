@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Union
 
 import torch
 import torch.nn as nn
 
-from .factorization import clean_input_factors, combined_input_factors, make_low_rank_linear
+from .factorization import (
+    clean_input_factors,
+    combined_input_factors_consuming,
+    make_low_rank_linear,
+)
 
 
 CapturedInputs = Union[torch.Tensor, Sequence[torch.Tensor]]
 CaptureInputs = Callable[[nn.Module, str], CapturedInputs]
+CapturePairs = Callable[[nn.Module, nn.Module, str], Iterable[tuple[torch.Tensor, torch.Tensor]]]
 GetModule = Callable[[nn.Module, str], nn.Module]
 SetModule = Callable[[nn.Module, str, nn.Module], None]
 Checkpoint = Callable[[nn.Module, set[str]], None]
@@ -28,6 +33,7 @@ class CompressionCallbacks:
     capture_inputs: CaptureInputs
     get_module: GetModule
     set_module: SetModule
+    capture_pairs: CapturePairs | None = None
     checkpoint: Checkpoint | None = None
     progress: Progress | None = None
 
@@ -95,27 +101,32 @@ def compress_sequentially(
                 callbacks.progress(layer_index, total_layers, name)
             continue
 
-        teacher_batches = _capture_batches(callbacks.capture_inputs(teacher, name))
-        student_batches = _capture_batches(callbacks.capture_inputs(student, name))
-        if len(teacher_batches) != len(student_batches):
-            raise ValueError(f"teacher/student capture batch count differs for {name}")
-        sigma_hh = torch.zeros((in_features, in_features), device=target, dtype=torch.float64)
-        sigma_hphp = torch.zeros_like(sigma_hh)
-        sigma_hph = torch.zeros_like(sigma_hh)
-        for teacher_batch, student_batch in zip(teacher_batches, student_batches):
+        statistics = {
+            "hh": torch.zeros((in_features, in_features), device=target, dtype=torch.float64),
+        }
+        statistics["hphp"] = torch.zeros_like(statistics["hh"])
+        statistics["hph"] = torch.zeros_like(statistics["hh"])
+        if callbacks.capture_pairs is not None:
+            paired_batches = callbacks.capture_pairs(teacher, student, name)
+        else:
+            teacher_batches = _capture_batches(callbacks.capture_inputs(teacher, name))
+            student_batches = _capture_batches(callbacks.capture_inputs(student, name))
+            if len(teacher_batches) != len(student_batches):
+                raise ValueError(f"teacher/student capture batch count differs for {name}")
+            paired_batches = zip(teacher_batches, student_batches)
+        for teacher_batch, student_batch in paired_batches:
             teacher_inputs = _as_2d(teacher_batch, in_features, target)
             student_inputs = _as_2d(student_batch, in_features, target)
             if teacher_inputs.shape[0] != student_inputs.shape[0]:
                 raise ValueError(f"teacher/student capture count differs for {name}")
-            sigma_hh.addmm_(teacher_inputs.T, teacher_inputs)
-            sigma_hphp.addmm_(student_inputs.T, student_inputs)
-            sigma_hph.addmm_(teacher_inputs.T, student_inputs)
+            statistics["hh"].addmm_(teacher_inputs.T, teacher_inputs)
+            statistics["hphp"].addmm_(student_inputs.T, student_inputs)
+            statistics["hph"].addmm_(teacher_inputs.T, student_inputs)
+            del teacher_inputs, student_inputs
         left = None if left_whiteners is None else left_whiteners.get(name)
-        factors = combined_input_factors(
+        factors = combined_input_factors_consuming(
             teacher_linear.weight,
-            sigma_hh,
-            sigma_hph,
-            sigma_hphp,
+            statistics,
             rank,
             alpha=alpha,
             left_whitener=left,
@@ -130,7 +141,9 @@ def compress_sequentially(
         if callbacks.checkpoint is not None and checkpoint_every and since_checkpoint >= checkpoint_every:
             callbacks.checkpoint(student, done)
             since_checkpoint = 0
-        del teacher_batches, student_batches, sigma_hh, sigma_hphp, sigma_hph
+        if callbacks.capture_pairs is None:
+            del teacher_batches, student_batches
+        del statistics, factors, current
         if target.type == "cuda":
             torch.cuda.empty_cache()
         if callbacks.progress is not None:
