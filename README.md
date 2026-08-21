@@ -78,6 +78,24 @@ and `cache/mpp` roots. SAFE-SVD imports only public `scOT.*` modules and keeps
 all Fisher, calibration, rank-selection, and low-rank replacement code inside
 SAFE-SVD; the `poseidon/` source tree is never edited.
 
+## Poseidon evaluation
+
+Evaluate a compressed model with Poseidon's original
+`get_dataset -> get_trainer -> rollout` path followed by the physical PDE
+metrics from `poseidon_analysis/physical_loss.py`:
+
+```bash
+python evaluation/poseidon/evaluate.py \
+  --poseidon-root ./poseidon \
+  --data-root ./poseidon/camlab-ethz/down_streams \
+  --checkpoint /path/to/original-finetuned-checkpoint \
+  --model /path/to/run/compressed/compressed_model_origin.pt \
+  --dataset fluids.incompressible.PiecewiseConstants
+```
+
+The JSON output is saved under the corresponding run's `evaluation/poseidon/`
+directory by default.
+
 <!-- SAFE-SVD is a unified, reproducible interface for applying SVD-based
 compression to three scientific foundation models:
 

@@ -27,5 +27,10 @@ models/
 
 # Repos.
 poseidon/
+# Keep the lightweight evaluation wrapper even though a local Poseidon source
+# checkout remains ignored above.
+!evaluation/
+!evaluation/poseidon/
+!evaluation/poseidon/**
 VICON/
 multiple_physics_pretraining/
