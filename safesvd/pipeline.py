@@ -53,9 +53,10 @@ def compress(config: SafeSVDConfig, *, dry_run: bool = False) -> CompressionResu
 
 
 def _initialise_run(request: RunRequest, command: tuple[str, ...]) -> None:
-    request.run_dir.mkdir(parents=True, exist_ok=False)
+    """Prepare a reproducible run directory without blocking resumable runs."""
+    request.run_dir.mkdir(parents=True, exist_ok=True)
     for child in ("cache", "ranks", "compressed", "evaluation"):
-        (request.run_dir / child).mkdir()
+        (request.run_dir / child).mkdir(exist_ok=True)
     config = asdict(request.config)
     config.update({key: str(value) for key, value in config.items() if isinstance(value, Path)})
     manifest = {
