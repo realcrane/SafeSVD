@@ -20,8 +20,12 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--model_name", default="Poseidon-L")
     result.add_argument("--dataset", default="fluids.incompressible.PiecewiseConstants")
     result.add_argument("--traj_num", type=int, required=True)
-    result.add_argument("--random_calibration", choices=("y", "n"), default="n")
-    result.add_argument("--calibration_seed", type=int, default=2026)
+    result.add_argument(
+        "--calibration_seed",
+        type=int,
+        default=-1,
+        help="-1 uses the fixed trajectory prefix; non-negative values select a seeded random subset.",
+    )
     result.add_argument("--final_time", type=int, default=15)
     result.add_argument("--time_back", type=int, default=0)
     result.add_argument("--rank_ratio", type=float, required=True)
@@ -43,12 +47,14 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    if args.calibration_seed < -1:
+        raise ValueError("--calibration_seed must be -1 or a non-negative integer.")
     output = run_poseidon(PoseidonOptions(
         repo_root=args.repo_root.resolve(), poseidon_root=args.poseidon_root.resolve(),
         model_path=args.model_path.resolve(), data_path=args.data_path.resolve(), save_path=args.save_path.resolve(),
         rank_root=args.rank_root.resolve(), cache_root=args.cache_root.resolve(),
         model_name=args.model_name, dataset=args.dataset, traj_num=args.traj_num,
-        random_calibration=args.random_calibration == "y", calibration_seed=args.calibration_seed,
+        calibration_seed=args.calibration_seed,
         final_time=args.final_time, time_back=args.time_back, rank_ratio=args.rank_ratio, device=args.DEV,
         use_fisher=args.use_fisher == "y", use_prev_time=args.use_prev_time == "True",
         balance_ratio=args.balance_ratio, order_control=args.order_control,

@@ -197,10 +197,10 @@ def evaluate_and_result(
 
 
 def get_metric_increases(metrics: dict[str, Any], origin_metrics: dict[str, Any]) -> dict[str, float]:
-    """Percentage differences reported for a compressed model."""
+    """Percentage differences, rounded to six decimal places, for a compressed model."""
     excluded = {"model_size", "linear_size"}
     return {
-        key: (float(value) - float(origin_metrics[key])) / float(origin_metrics[key])
+        key: round(100.0 * (float(value) - float(origin_metrics[key])) / float(origin_metrics[key]), 6)
         for key, value in metrics.items()
         if key in origin_metrics
         and key not in excluded
@@ -212,4 +212,3 @@ def get_metric_increases(metrics: dict[str, Any], origin_metrics: dict[str, Any]
 
 def _as_scalar(value: Any) -> Any:
     return value.item() if hasattr(value, "item") else value
-

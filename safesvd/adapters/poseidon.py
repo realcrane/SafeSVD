@@ -40,7 +40,6 @@ class PoseidonAdapter(Adapter):
             "--DEV", request.device,
             "--rank_ratio", str(request.config.rank_ratio),
             "--traj_num", str(request.config.calibration_size),
-            "--calibration_seed", str(request.config.calibration_seed),
             "--alpha", str(request.config.alpha),
             *( ("--overwrite_cache",) if request.config.overwrite else () ),
             *request.config.extra,

@@ -45,7 +45,6 @@ class PoseidonOptions:
     model_name: str
     dataset: str
     traj_num: int
-    random_calibration: bool
     calibration_seed: int
     final_time: int
     time_back: int
@@ -62,10 +61,13 @@ class PoseidonOptions:
 
     @property
     def calibration_tag(self) -> str:
-        tag = f"traj{self.traj_num}"
-        if self.random_calibration:
-            tag += f"_random_seed{self.calibration_seed}"
-        return f"{tag}_ftime{self.final_time}"
+        selection = "default" if self.calibration_seed == -1 else f"seed{self.calibration_seed}"
+        return f"traj{self.traj_num}_{selection}_ftime{self.final_time}"
+
+    @property
+    def random_calibration(self) -> bool:
+        """Whether this run uses seeded random trajectory selection."""
+        return self.calibration_seed >= 0
 
     @property
     def rank_path(self) -> Path:

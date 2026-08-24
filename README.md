@@ -63,11 +63,19 @@ python -m safesvd.cli compress \
   --data-root /path/to/SAFE-SVD-v0/poseidon/camlab-ethz/down_streams \
   --rank-ratio 0.2 \
   --calibration-size 64 \
-  -- \
   --dataset fluids.incompressible.PiecewiseConstants \
+  --final-time 20 \
+  -- \
   --model_name Poseidon-L \
   --fast
 ```
+
+The default output path is addressed by the compression settings, for example
+`artifacts/poseidon/paper/0.2/fluids.incompressible.PiecewiseConstants/traj64_default_ftime20/`.
+For Poseidon, `--calibration-seed -1` uses the fixed prefix of training
+trajectories. Pass a non-negative seed, such as `--calibration-seed 7`, to
+sample a reproducible, different set of complete trajectories; its output
+directory is `traj64_seed7_ftime20`.
 
 Poseidon compression always uses MySVD_fast's 512-sample activation-capture
 chunk and consumes each teacher/student pair before capturing the next one.
@@ -93,8 +101,9 @@ python evaluation/poseidon/evaluate.py \
   --dataset fluids.incompressible.PiecewiseConstants
 ```
 
-The JSON output is saved under the corresponding run's `evaluation/poseidon/`
-directory by default.
+The JSON output is saved as `metrics.json` in the corresponding run directory
+by default. Its compressed-model `increase` values are percentages rounded to
+six decimal places.
 
 <!-- SAFE-SVD is a unified, reproducible interface for applying SVD-based
 compression to three scientific foundation models:

@@ -21,7 +21,7 @@ python evaluation/poseidon/evaluate.py \
     --poseidon-root poseidon \
     --data-root poseidon/camlab-ethz/down_streams \
     --checkpoint models/poseidon/fluids.incompressible.PiecewiseConstants \
-    --model artifacts/poseidon/paper/20260819T011617Z/compressed/compressed_model_origin.pt \
+    --model artifacts/poseidon/paper/0.2/fluids.incompressible.PiecewiseConstants/traj64_ftime20/compressed/compressed_model_origin.pt \
 """
 
 from __future__ import annotations
@@ -168,8 +168,8 @@ def build_test_dataset(get_dataset: Any, args: argparse.Namespace) -> Dataset:
 
 def default_output_path(checkpoint: Path, compressed_model: Path | None) -> Path:
     source = compressed_model or checkpoint
-    if source.is_file() and source.parent.name == "compressed":
-        return source.parent.parent / "evaluation" / "poseidon" / "metrics.json"
+    if source.parent.name == "compressed":
+        return source.parent.parent / "metrics.json"
     return source.parent / "evaluation" / "poseidon" / "metrics.json"
 
 

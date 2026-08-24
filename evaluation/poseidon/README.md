@@ -22,8 +22,8 @@ python evaluation/poseidon/evaluate.py \
   --dataset fluids.incompressible.PiecewiseConstants
 ```
 
-The JSON contains origin metrics, compressed metrics, and per-metric relative
-increases. For a SAFE-SVD run it is written by default to
-`<run>/evaluation/poseidon/metrics.json`. Omit `--model` to evaluate only the
-original checkpoint. `--eval-obj oncomp` retains the original script's
+The JSON contains origin metrics, compressed metrics, and per-metric increases
+expressed as percentages rounded to six decimal places. For a SAFE-SVD run it
+is written by default to `<run>/metrics.json`. Omit `--model` to evaluate only
+the original checkpoint. `--eval-obj oncomp` retains the original script's
 fidelity mode, using original-model predictions as labels.
