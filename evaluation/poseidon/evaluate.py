@@ -92,7 +92,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=1024,
+        default=256,
         help="Poseidon physical_loss.py default.",
     )
     parser.add_argument(
