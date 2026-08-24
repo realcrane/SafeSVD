@@ -29,7 +29,7 @@ from safesvd.core import (
 
 # These values reproduce MySVD_origin.  Keep them in the adapter rather than
 # changing Poseidon's own inference code.
-FISHER_BATCH_SIZE = 32
+FISHER_BATCH_SIZE = 24
 ORIGIN_CAPTURE_BATCH_SIZE = 256
 
 
