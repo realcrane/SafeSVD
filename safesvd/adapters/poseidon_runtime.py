@@ -29,8 +29,8 @@ from safesvd.core import (
 
 # These values reproduce MySVD_origin.  Keep them in the adapter rather than
 # changing Poseidon's own inference code.
-FISHER_BATCH_SIZE = 32
-ORIGIN_CAPTURE_BATCH_SIZE = 512
+FISHER_BATCH_SIZE = 16
+ORIGIN_CAPTURE_BATCH_SIZE = 256
 
 
 @dataclass(frozen=True)
@@ -405,9 +405,9 @@ def run_poseidon(options: PoseidonOptions) -> Path:
         max_num_time_steps=target_time,
     )
     print("Calibration selection:", describe_calibration_selection(calibration_data, options.random_calibration))
-    print("Building Poseidon trainer: eval_batch_size=256, dataloader_workers=0", flush=True)
+    print("Building Poseidon trainer: eval_batch_size=32, dataloader_workers=0", flush=True)
     trainer = _build_memory_safe_trainer(
-        helpers["get_trainer"], model_path=str(options.model_path), batch_size=256, dataset=calibration_data
+        helpers["get_trainer"], model_path=str(options.model_path), batch_size=32, dataset=calibration_data
     )
 
     fisher = _load_or_collect_fisher(options, trainer, calibration_data, helpers)
@@ -415,7 +415,7 @@ def run_poseidon(options: PoseidonOptions) -> Path:
     if options.profile_path.is_file() and not options.overwrite:
         profile = torch.load(options.profile_path, map_location="cpu")
     else:
-        print("Profiling activations: eval_batch_size=256, dataloader_workers=0", flush=True)
+        print("Profiling activations: eval_batch_size=32, dataloader_workers=0", flush=True)
         profile = _profile_inputs(trainer, calibration_data, options.device, helpers["rollout"])
         options.profile_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(profile, options.profile_path)
