@@ -60,16 +60,12 @@ def place_file(source: Path, destination: Path, force: bool) -> None:
         print(f"Already exists, skipping: {destination}")
         return
 
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
+    if destination.exists() or destination.is_symlink():
         destination.unlink()
 
-    # A hard link avoids a second copy when the Hub cache and output directory
-    # are on the same filesystem. Fall back to a normal copy otherwise.
-    try:
-        os.link(source, destination)
-    except OSError:
-        shutil.copy2(source, destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    shutil.copy2(source.resolve(), destination)
 
 
 def download(repo_file: str, destination: Path, force: bool) -> None:

@@ -10,6 +10,18 @@ The control flow mirrors ``poseidon_analysis/physical_loss.py``:
 
 Unlike the research script, this entry point has no compression sweep,
 performance profiling, plotting, or CSV cache.
+
+python evaluation/poseidon/evaluate.py \
+  --poseidon-root /path/to/poseidon \
+  --data-root /path/to/down_streams \
+  --checkpoint /path/to/original-checkpoint \
+  --model /path/to/compressed_model_origin.pt \
+
+python evaluation/poseidon/evaluate.py \
+    --poseidon-root poseidon \
+    --data-root poseidon/camlab-ethz/down_streams \
+    --checkpoint models/poseidon/fluids.incompressible.PiecewiseConstants \
+    --model artifacts/poseidon/paper/20260819T011617Z/compressed/compressed_model_origin.pt \
 """
 
 from __future__ import annotations
