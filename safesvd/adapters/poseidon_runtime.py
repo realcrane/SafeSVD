@@ -25,12 +25,13 @@ from safesvd.core import (
     compress_sequentially,
     svd_whitener,
 )
+from safesvd.adapters.poseidon_fast_reuse import MySVDfastCapturePairs
 
 
-# These values reproduce MySVD_origin.  Keep them in the adapter rather than
-# changing Poseidon's own inference code.
+# Match the current MySVD_fast calibration and activation-capture chunking.
+# Keep these runtime settings in the adapter rather than modifying Poseidon.
 FISHER_BATCH_SIZE = 8
-ORIGIN_CAPTURE_BATCH_SIZE = 256
+ORIGIN_CAPTURE_BATCH_SIZE = 64
 
 
 @dataclass(frozen=True)
@@ -453,7 +454,13 @@ def run_poseidon(options: PoseidonOptions) -> Path:
 
     callbacks = CompressionCallbacks(
         capture_inputs=_capture_inputs(trainer, calibration_data, helpers, options.device, options.fast),
-        capture_pairs=_capture_input_pairs(trainer, calibration_data, helpers, options.device),
+        capture_pairs=MySVDfastCapturePairs(
+            trainer,
+            calibration_data,
+            helpers,
+            options.device,
+            ORIGIN_CAPTURE_BATCH_SIZE,
+        ),
         get_module=helpers["get_module_by_name"],
         set_module=helpers["set_module_by_name"],
         checkpoint=checkpoint,
