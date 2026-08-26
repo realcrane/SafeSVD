@@ -136,7 +136,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"SAFE-SVD {config.model}/{config.preset}")
     print(f"Output: {result.output_dir}")
     print(f"Backend command: {shlex.join(result.backend_command)}")
-    return 0 if result.returncode is None else result.returncode
+    if result.returncode not in (None, 0):
+        print(f"ERROR: backend exited before completion (exit code {result.returncode}).", file=sys.stderr)
+        return result.returncode
+    return 0
 
 
 if __name__ == "__main__":
