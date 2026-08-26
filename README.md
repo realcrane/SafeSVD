@@ -15,8 +15,20 @@ The resulting structure is `SAFE-SVD/poseidon/`, `SAFE-SVD/vicon/`, and
 
 ### Environment
 ```bash
-conda create -n ...
-pip install ...
+conda create -n poseidon python=3.11 pip
+conda activate poseidon
+
+# Install the PyTorch CUDA wheel appropriate for the machine first.  PyTorch
+# is deliberately not listed in requirements.txt because this choice depends
+# on the NVIDIA driver/GPU.  Do not mix a pip CUDA wheel with conda cudatoolkit.
+# Example: follow https://pytorch.org/get-started/locally/ for the desired CUDA wheel.
+python -m pip install torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 \
+  --index-url https://download.pytorch.org/whl/cu128
+
+# Install the GPU-independent Poseidon/SAFE-SVD dependencies.
+python -m pip install -r requirements.txt
+python -m pip install -e ./poseidon
+python -m pip install -e .
 ```
 
 ## Dataset Downloads
