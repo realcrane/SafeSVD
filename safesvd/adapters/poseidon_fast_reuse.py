@@ -143,6 +143,18 @@ class MySVDfastCapturePairs:
             return
         yield from self._direct_pairs(teacher, student, layer_name)
 
+    def release_cached_inputs(self, layer_name: str) -> None:
+        """Match MySVD_fast's cleanup when a dependent layer is not compressed."""
+        mlp = _mlp_spec(layer_name)
+        if mlp is not None and layer_name == mlp[3]:
+            self.mlp_cache.pop(layer_name, None)
+        attention = _attention_spec(layer_name)
+        if attention is not None and attention[0] == "output":
+            self.attention_cache.pop(attention[1], None)
+        patch = _patch_spec(layer_name)
+        if patch is not None and patch[0] == "mixup":
+            self.patch_cache.pop(layer_name, None)
+
     def _subsets(self) -> Iterator[Any]:
         for start in range(0, len(self.calibration_data), self.batch_size):
             stop = min(start + self.batch_size, len(self.calibration_data))

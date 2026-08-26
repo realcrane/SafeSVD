@@ -452,19 +452,21 @@ def run_poseidon(options: PoseidonOptions) -> Path:
         if torch.device(options.device).type == "cuda":
             torch.cuda.empty_cache()
 
+    capture_pairs = MySVDfastCapturePairs(
+        trainer,
+        calibration_data,
+        helpers,
+        options.device,
+        ORIGIN_CAPTURE_BATCH_SIZE,
+    )
     callbacks = CompressionCallbacks(
         capture_inputs=_capture_inputs(trainer, calibration_data, helpers, options.device, options.fast),
-        capture_pairs=MySVDfastCapturePairs(
-            trainer,
-            calibration_data,
-            helpers,
-            options.device,
-            ORIGIN_CAPTURE_BATCH_SIZE,
-        ),
+        capture_pairs=capture_pairs,
         get_module=helpers["get_module_by_name"],
         set_module=helpers["set_module_by_name"],
         checkpoint=checkpoint,
         progress=_compression_progress(),
+        release_cached_inputs=capture_pairs.release_cached_inputs,
     )
     trainer.set_ar_steps(None, output_all_steps=False)
     capture_batch_size = ORIGIN_CAPTURE_BATCH_SIZE

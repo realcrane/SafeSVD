@@ -24,6 +24,7 @@ GetModule = Callable[[nn.Module, str], nn.Module]
 SetModule = Callable[[nn.Module, str, nn.Module], None]
 Checkpoint = Callable[[nn.Module, set[str]], None]
 Progress = Callable[[int, int, str], None]
+ReleaseCachedInputs = Callable[[str], None]
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class CompressionCallbacks:
     capture_pairs: CapturePairs | None = None
     checkpoint: Checkpoint | None = None
     progress: Progress | None = None
+    release_cached_inputs: ReleaseCachedInputs | None = None
 
 
 def _as_2d(inputs: torch.Tensor, in_features: int, device: torch.device) -> torch.Tensor:
@@ -84,11 +86,15 @@ def compress_sequentially(
     total_layers = len(linear_names)
     for layer_index, (name, teacher_linear) in enumerate(linear_names, start=1):
         if name in done:
+            if callbacks.release_cached_inputs is not None:
+                callbacks.release_cached_inputs(name)
             if callbacks.progress is not None:
                 callbacks.progress(layer_index, total_layers, name)
             continue
         rank = ranks.get(name)
         if rank is None:
+            if callbacks.release_cached_inputs is not None:
+                callbacks.release_cached_inputs(name)
             done.add(name)
             if callbacks.progress is not None:
                 callbacks.progress(layer_index, total_layers, name)
@@ -96,6 +102,8 @@ def compress_sequentially(
         rank = int(rank)
         in_features, out_features = teacher_linear.in_features, teacher_linear.out_features
         if rank < 1 or rank * (in_features + out_features) >= in_features * out_features:
+            if callbacks.release_cached_inputs is not None:
+                callbacks.release_cached_inputs(name)
             done.add(name)
             if callbacks.progress is not None:
                 callbacks.progress(layer_index, total_layers, name)
