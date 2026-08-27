@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -24,12 +25,13 @@ class PoseidonAdapter(Adapter):
     def command(self, request: RunRequest) -> list[str]:
         poseidon_root = self.source_root(request)
         artifacts = BackendArtifactLayout(request.repo_root, self.name)
-        # Use the interpreter that launched ``python -m safesvd.cli``.  This
-        # keeps the adapter in the active Poseidon environment without asking
-        # users to set a second interpreter path.
-        runtime_python = sys.executable
+        # Usually the current interpreter is already the Poseidon environment.
+        # A separate runtime can be selected when the public CLI is launched
+        # from an incompatible environment (for example an AIMET environment
+        # with a different PyTorch/CUDA native stack).
+        runtime_python = os.environ.get("SAFE_SVD_RUNTIME_PYTHON", sys.executable)
         return [
-            runtime_python, "-u", "-m", "safesvd.adapters.poseidon_runner",
+            runtime_python, "-X", "faulthandler", "-u", "-m", "safesvd.adapters.poseidon_runner",
             "--repo-root", str(request.repo_root),
             "--poseidon-root", str(poseidon_root),
             "--model_path", str(request.assets.resolved_model_path),

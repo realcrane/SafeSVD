@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -87,6 +88,35 @@ class PublicInterfaceTest(unittest.TestCase):
             result.stdout,
         )
         self.assertIn("--calibration_seed 7", result.stdout)
+
+    def test_poseidon_runtime_python_can_be_overridden(self) -> None:
+        environment = os.environ.copy()
+        environment.update({
+            "PYTHONPATH": str(PROJECT_DIR),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "SAFE_SVD_RUNTIME_PYTHON": "/tmp/poseidon-env/bin/python",
+        })
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "safesvd.cli", "compress",
+                "--model", "poseidon",
+                "--checkpoint", "/tmp/poseidon-weights",
+                "--data-root", "/tmp/poseidon-data",
+                "--rank-ratio", "0.2",
+                "--calibration-size", "64",
+                "--dry-run",
+            ],
+            cwd=PROJECT_DIR,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "/tmp/poseidon-env/bin/python -X faulthandler -u -m safesvd.adapters.poseidon_runner",
+            result.stdout,
+        )
 
     def test_legacy_selector_has_distinct_output_and_rank_paths(self) -> None:
         result = subprocess.run(

@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 from pathlib import Path
 
-from safesvd.adapters.poseidon_runtime import PoseidonOptions, run_poseidon
+# AIMET and some HPC environments load incompatible native BLAS/OpenMP state
+# when NumPy is imported before PyTorch.  scOT.inference imports NumPy early,
+# so initialise PyTorch explicitly before importing any Poseidon runtime code.
+import torch
+
+
+faulthandler.enable(all_threads=True)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -50,6 +57,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.calibration_seed < -1:
         raise ValueError("--calibration_seed must be -1 or a non-negative integer.")
+    print(
+        f"Poseidon backend: preloaded PyTorch {torch.__version__} "
+        f"(CUDA {torch.version.cuda})",
+        flush=True,
+    )
+    print("Poseidon backend: loading SAFE-SVD runtime modules", flush=True)
+    from safesvd.adapters.poseidon_runtime import PoseidonOptions, run_poseidon
+
+    print("Poseidon backend: runtime modules loaded", flush=True)
     output = run_poseidon(PoseidonOptions(
         repo_root=args.repo_root.resolve(), poseidon_root=args.poseidon_root.resolve(),
         model_path=args.model_path.resolve(), data_path=args.data_path.resolve(), save_path=args.save_path.resolve(),

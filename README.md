@@ -112,6 +112,18 @@ parameters, and compares each next singular direction with an explicit
 full-rank tail-energy transition. Use `--rank-selector legacy` only to
 reproduce the former MySVD-compatible allocation.
 
+The Poseidon backend normally uses the Python interpreter that launches the
+public CLI. If that interpreter belongs to another native PyTorch stack (for
+example AIMET), point the backend at a dedicated Poseidon environment:
+
+```bash
+SAFE_SVD_RUNTIME_PYTHON=/path/to/poseidon-env/bin/python \
+python -m safesvd.cli compress ...
+```
+
+Backend subprocesses enable Python's faulthandler by default so native crashes
+include the active Python stack in stderr.
+
 Poseidon compression always uses MySVD_fast's 512-sample activation-capture
 chunk and consumes each teacher/student pair before capturing the next one.
 `--fast` is retained as a no-op compatibility flag. Persistent artifacts are backend-scoped:

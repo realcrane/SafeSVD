@@ -197,8 +197,10 @@ def _imports(options: PoseidonOptions):
         )
     _prepend_import_path(options.poseidon_root)
     try:
+        print(f"Poseidon backend: importing scOT from {options.poseidon_root}", flush=True)
         from scOT.inference import get_trainer, rollout
         from scOT.problems.base import get_dataset
+        print("Poseidon backend: importing SAFE-SVD Poseidon compatibility helpers", flush=True)
         from backends.poseidon.paper.helper.fisher_collector import (
             collect_fisher_dict_linear_only,
             collect_fisher_dict_time_sob,
@@ -214,6 +216,7 @@ def _imports(options: PoseidonOptions):
             "Poseidon runtime dependencies are unavailable. Activate the Poseidon "
             "environment or set SAFE_SVD_RUNTIME_PYTHON to its Python executable."
         ) from exc
+    print("Poseidon backend: upstream and compatibility imports loaded", flush=True)
     return {
         "as_2d_x": as_2d_x,
         "collect_fisher_dict_linear_only": collect_fisher_dict_linear_only,
