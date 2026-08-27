@@ -22,6 +22,7 @@ class SafeSVDConfig:
     rank_ratio: float
     calibration_size: int
     calibration_seed: int
+    source_root: Path | None = None
     device: str = "cuda"
     alpha: float = 0.7
     preset: str = "paper"
@@ -39,3 +40,27 @@ class SafeSVDConfig:
             raise ValueError("calibration_size must be positive")
         if not 0 <= self.alpha <= 1:
             raise ValueError("alpha must be in [0, 1]")
+
+
+@dataclass(frozen=True)
+class SafeSVDEvaluationConfig:
+    """Public inputs for evaluating an original and compressed SAFE-SVD model."""
+
+    model: str
+    checkpoint: Path
+    data_root: Path
+    compressed_model: Path | None
+    output_path: Path
+    source_root: Path | None = None
+    device: str = "cuda"
+    batch_size: int | None = None
+    max_batches: int | None = None
+    extra: tuple[str, ...] = ()
+
+    def validate(self) -> None:
+        if self.model not in {"poseidon", "vicon", "mpp"}:
+            raise ValueError("model must be one of: poseidon, vicon, mpp")
+        if self.batch_size is not None and self.batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        if self.max_batches is not None and self.max_batches <= 0:
+            raise ValueError("max_batches must be positive")

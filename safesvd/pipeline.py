@@ -13,14 +13,21 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from safesvd.adapters import get_adapter
-from safesvd.adapters.base import RunRequest
+from safesvd.adapters.base import EvaluationRequest, RunRequest
 from safesvd.assets import AssetLayout
-from safesvd.config import SafeSVDConfig
+from safesvd.config import SafeSVDConfig, SafeSVDEvaluationConfig
 
 
 @dataclass(frozen=True)
 class CompressionResult:
     output_dir: Path
+    backend_command: tuple[str, ...]
+    returncode: int | None
+
+
+@dataclass(frozen=True)
+class EvaluationResult:
+    output_path: Path
     backend_command: tuple[str, ...]
     returncode: int | None
 
@@ -66,3 +73,33 @@ def _initialise_run(request: RunRequest, command: tuple[str, ...]) -> None:
         "backend_command_shell": shlex.join(command),
     }
     (request.run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+
+
+def evaluate(config: SafeSVDEvaluationConfig, *, dry_run: bool = False) -> EvaluationResult:
+    """Evaluate an original checkpoint and an optional compressed SAFE-SVD model."""
+    config.validate()
+    checkpoint = config.checkpoint.expanduser().resolve()
+    data_root = config.data_root.expanduser().resolve()
+    compressed = config.compressed_model.expanduser().resolve() if config.compressed_model else None
+    output = config.output_path.expanduser().resolve()
+    assets = AssetLayout(
+        assets_dir=output.parent,
+        model=config.model,
+        model_path=checkpoint,
+        data_root=data_root,
+    )
+    request = EvaluationRequest(
+        repo_root=Path(__file__).resolve().parents[1],
+        assets=assets,
+        compressed_model=compressed,
+        output_path=output,
+        device=config.device,
+        config=config,
+    )
+    adapter = get_adapter(config.model)
+    command = tuple(adapter.evaluation_command(request))
+    if dry_run:
+        return EvaluationResult(output, command, None)
+    adapter.validate_evaluation(request)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    return EvaluationResult(output, command, adapter.execute_evaluation(request))

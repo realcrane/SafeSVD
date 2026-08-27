@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from safesvd.assets import AssetLayout
-from safesvd.config import SafeSVDConfig
+from safesvd.config import SafeSVDConfig, SafeSVDEvaluationConfig
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,16 @@ class RunRequest:
     run_dir: Path
     device: str
     config: SafeSVDConfig
+
+
+@dataclass(frozen=True)
+class EvaluationRequest:
+    repo_root: Path
+    assets: AssetLayout
+    compressed_model: Path | None
+    output_path: Path
+    device: str
+    config: SafeSVDEvaluationConfig
 
 
 class Adapter(abc.ABC):
@@ -55,6 +65,38 @@ class Adapter(abc.ABC):
             env=self.environment(request),
             check=False,
         ).returncode
+
+    def evaluation_command(self, request: EvaluationRequest) -> list[str]:
+        """Translate the public evaluator config, if this backend supports it."""
+        raise NotImplementedError(f"{self.name} does not expose an evaluator")
+
+    def validate_evaluation(self, request: EvaluationRequest) -> None:
+        """Default validation common to all evaluator routes."""
+        require = request.assets.resolved_model_path
+        if not require.exists():
+            raise FileNotFoundError(f"{self.name} checkpoint was not found at {require}")
+        if not request.assets.resolved_data_root.exists():
+            raise FileNotFoundError(f"{self.name} data root was not found at {request.assets.resolved_data_root}")
+        if request.compressed_model is not None and not request.compressed_model.is_file():
+            raise FileNotFoundError(f"compressed model was not found at {request.compressed_model}")
+
+    def execute_evaluation(self, request: EvaluationRequest) -> int:
+        return subprocess.run(
+            self.evaluation_command(request),
+            cwd=self.working_directory_for_evaluation(request),
+            env=self.evaluation_environment(request),
+            check=False,
+        ).returncode
+
+    def working_directory_for_evaluation(self, request: EvaluationRequest) -> Path:
+        return request.repo_root
+
+    def evaluation_environment(self, request: EvaluationRequest) -> dict[str, str]:
+        env = os.environ.copy()
+        env["SAFE_SVD_ASSETS_DIR"] = str(request.assets.assets_dir)
+        env["SAFE_SVD_MODEL_PATH"] = str(request.assets.resolved_model_path)
+        env["SAFE_SVD_DATA_ROOT"] = str(request.assets.resolved_data_root)
+        return env
 
     @staticmethod
     def python(script: Path) -> list[str]:

@@ -10,13 +10,21 @@ reuse the local `poseidon_main` research fork:
 git clone https://github.com/camlab-ethz/poseidon.git poseidon
 ```
 
-The resulting structure is `SAFE-SVD/poseidon/`, `SAFE-SVD/vicon/`, and
-`SAFE-SVD/mpp/`.
+The resulting structure is `SAFE-SVD-v0/poseidon/`,
+`SAFE-SVD-v0/vicon/VICON/`, and
+`SAFE-SVD-v0/mpp/multiple_physics_pretraining/`.  ViCON needs the full
+upstream checkout containing `VICON/src` and `VICON/configs`; MPP needs the
+full checkout containing `multiple_physics_pretraining/models/avit.py`.
+The small research snapshots under `physic_model_comp/` do not contain those
+gitignored model-source directories, so they are useful as a reference but
+cannot run the adapters on their own.
 
 ### Environment
 ```bash
-conda create -n poseidon python=3.11 pip
+conda create -n poseidon -c conda-forge --override-channels --no-default-packages python=3.11
 conda activate poseidon
+python -m ensurepip --upgrade
+python -m pip install --upgrade pip
 
 # Install the PyTorch CUDA wheel appropriate for the machine first.  PyTorch
 # is deliberately not listed in requirements.txt because this choice depends
@@ -39,10 +47,17 @@ python downloads/poseidon/datasets/downstreams.py
 ```
 
 ### VICON
-Please refer to vicon repo for the downloading. (wait to try again)
+Download and unpack the data following the upstream ViCON instructions, then
+pass its root through `--data-root`.  The adapter applies that root to the
+Hydra dataset configuration.  If a configuration uses non-standard field
+names, pass one or more upstream Hydra overrides after `--`, for example
+`-- --config-override datasets.NS2D.path=/datasets/vicon/ns2d`.
 
 ### MPP
-Please refer to mpp repo for the downloading. (wait to try again)
+Download and unpack the data following the upstream Multiple Physics
+Pretraining instructions, then pass the parent data directory through
+`--data-root`.  SAFE-SVD rebases the `train_data_paths` and `valid_data_paths`
+in MPP's YAML under that directory.
 
 ## Foundation and Finetuned Model Downloads
 We have totally n finetuned poseidon models, and one VICON and MPP foundation model for user to easy strat compression. Please run the command below for downloads.
@@ -116,6 +131,79 @@ python evaluation/poseidon/evaluate.py \
 The JSON output is saved as `metrics.json` in the corresponding run directory
 by default. Its compressed-model `increase` values are percentages rounded to
 six decimal places.
+
+## ViCON and MPP compression
+
+The same top-level command now routes ViCON and MPP through SAFE-SVD's shared
+whitening, Fisher/rank selection, sequential low-rank replacement, resumable
+checkpointing, and portable compressed-state format.  Each model retains its
+upstream loader and physical loss conventions.
+
+```bash
+# ViCON: ./vicon must contain the full upstream ./vicon/VICON checkout.
+python -m safesvd.cli compress \
+  --model vicon \
+  --source-root ./vicon \
+  --checkpoint ./models/VICON/model.pth \
+  --data-root /datasets/vicon \
+  --rank-ratio 0.2 \
+  --calibration-size 2048 \
+  --calibration-seed 42 \
+  --device cuda \
+  -- --batch-size 128
+
+# MPP: ./mpp must contain ./mpp/multiple_physics_pretraining.
+python -m safesvd.cli compress \
+  --model mpp \
+  --source-root ./mpp \
+  --checkpoint ./models/MPP/MPP_AViT_L \
+  --data-root /datasets/mpp \
+  --rank-ratio 0.2 \
+  --calibration-size 1024 \
+  --calibration-seed 42 \
+  --device cuda \
+  -- --batch-size 4
+```
+
+`--calibration-size` is the requested number of samples per ViCON dataset
+category and the target number of samples drawn from each MPP physical-data
+file.  To preserve the paper routes, ViCON consumes
+`floor(calibration-size / batch-size)` batches (so it must be at least one
+batch); MPP consumes `ceil(calibration-size / batch-size)` batches per data
+file.  The adapter caches profile/Fisher statistics and ranks under `cache/vicon` or
+`cache/mpp` and `ranks/vicon` or `ranks/mpp`; the run directory contains
+`compressed/compressed_model.pth` (ViCON) or `compressed/compressed_model.pt`
+(MPP).
+
+## Unified evaluation
+
+Evaluate the original checkpoint and, optionally, the compressed checkpoint
+on identical upstream test data.  The output JSON records aggregate and
+per-dataset physical metrics; `--max-batches` is useful for a quick smoke
+test.
+
+```bash
+python -m safesvd.cli evaluate \
+  --model vicon \
+  --source-root ./vicon \
+  --checkpoint ./models/VICON/model.pth \
+  --compressed-model artifacts/vicon/paper/<run>/compressed/compressed_model.pth \
+  --data-root /datasets/vicon \
+  --max-batches 10
+
+python -m safesvd.cli evaluate \
+  --model mpp \
+  --source-root ./mpp \
+  --checkpoint ./models/MPP/MPP_AViT_L \
+  --compressed-model artifacts/mpp/paper/<run>/compressed/compressed_model.pt \
+  --data-root /datasets/mpp \
+  --max-batches 10
+```
+
+ViCON reports its upstream masked MSE and relative loss plus task-specific
+Sobolev and, where applicable, incompressible-flow divergence and vorticity
+metrics.  MPP reports relative error, Sobolev error, and the corresponding incompressible NS,
+compressible NS, SWE, or diffusion-reaction physical metrics.
 
 <!-- SAFE-SVD is a unified, reproducible interface for applying SVD-based
 compression to three scientific foundation models:

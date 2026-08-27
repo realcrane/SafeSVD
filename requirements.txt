@@ -23,3 +23,12 @@ tokenizers==0.13.3
 tqdm==4.69.1
 transformers==4.29.2
 wandb==0.14.2
+
+# VICON / MPP route dependencies.  Install the complete upstream source tree
+# for either route as documented in README; these packages only cover the
+# SAFE-SVD adapter layer and its data/configuration interfaces.
+einops==0.7.0
+hydra-core==1.3.2
+omegaconf==2.3.0
+ruamel.yaml==0.17.32
+timm==0.9.5

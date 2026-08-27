@@ -20,6 +20,7 @@ from .factorization import (
 CapturedInputs = Union[torch.Tensor, Sequence[torch.Tensor]]
 CaptureInputs = Callable[[nn.Module, str], CapturedInputs]
 CapturePairs = Callable[[nn.Module, nn.Module, str], Iterable[tuple[torch.Tensor, torch.Tensor]]]
+CaptureStatistics = Callable[[nn.Module, nn.Module, str], Mapping[str, torch.Tensor]]
 GetModule = Callable[[nn.Module, str], nn.Module]
 SetModule = Callable[[nn.Module, str, nn.Module], None]
 Checkpoint = Callable[[nn.Module, set[str]], None]
@@ -38,6 +39,11 @@ class CompressionCallbacks:
     checkpoint: Checkpoint | None = None
     progress: Progress | None = None
     release_cached_inputs: ReleaseCachedInputs | None = None
+    # Multi-physics backends need to aggregate teacher/student activations by
+    # dataset category before factorisation.  Keeping this optional lets
+    # Poseidon retain its memory-efficient streamed pair capture while VICON
+    # and MPP reproduce their trace-balanced covariance objective.
+    capture_statistics: CaptureStatistics | None = None
 
 
 def _as_2d(inputs: torch.Tensor, in_features: int, device: torch.device) -> torch.Tensor:
@@ -109,28 +115,39 @@ def compress_sequentially(
                 callbacks.progress(layer_index, total_layers, name)
             continue
 
-        statistics = {
-            "hh": torch.zeros((in_features, in_features), device=target, dtype=torch.float64),
-        }
-        statistics["hphp"] = torch.zeros_like(statistics["hh"])
-        statistics["hph"] = torch.zeros_like(statistics["hh"])
-        if callbacks.capture_pairs is not None:
-            paired_batches = callbacks.capture_pairs(teacher, student, name)
+        if callbacks.capture_statistics is not None:
+            captured = callbacks.capture_statistics(teacher, student, name)
+            required = {"hh", "hph", "hphp"}
+            missing = required.difference(captured)
+            if missing:
+                raise KeyError(f"adapter statistics for {name} are missing: {sorted(missing)}")
+            statistics = {
+                key: _as_2d_covariance(captured[key], in_features, target, key)
+                for key in required
+            }
         else:
-            teacher_batches = _capture_batches(callbacks.capture_inputs(teacher, name))
-            student_batches = _capture_batches(callbacks.capture_inputs(student, name))
-            if len(teacher_batches) != len(student_batches):
-                raise ValueError(f"teacher/student capture batch count differs for {name}")
-            paired_batches = zip(teacher_batches, student_batches)
-        for teacher_batch, student_batch in paired_batches:
-            teacher_inputs = _as_2d(teacher_batch, in_features, target)
-            student_inputs = _as_2d(student_batch, in_features, target)
-            if teacher_inputs.shape[0] != student_inputs.shape[0]:
-                raise ValueError(f"teacher/student capture count differs for {name}")
-            statistics["hh"].addmm_(teacher_inputs.T, teacher_inputs)
-            statistics["hphp"].addmm_(student_inputs.T, student_inputs)
-            statistics["hph"].addmm_(teacher_inputs.T, student_inputs)
-            del teacher_inputs, student_inputs
+            statistics = {
+                "hh": torch.zeros((in_features, in_features), device=target, dtype=torch.float64),
+            }
+            statistics["hphp"] = torch.zeros_like(statistics["hh"])
+            statistics["hph"] = torch.zeros_like(statistics["hh"])
+            if callbacks.capture_pairs is not None:
+                paired_batches = callbacks.capture_pairs(teacher, student, name)
+            else:
+                teacher_batches = _capture_batches(callbacks.capture_inputs(teacher, name))
+                student_batches = _capture_batches(callbacks.capture_inputs(student, name))
+                if len(teacher_batches) != len(student_batches):
+                    raise ValueError(f"teacher/student capture batch count differs for {name}")
+                paired_batches = zip(teacher_batches, student_batches)
+            for teacher_batch, student_batch in paired_batches:
+                teacher_inputs = _as_2d(teacher_batch, in_features, target)
+                student_inputs = _as_2d(student_batch, in_features, target)
+                if teacher_inputs.shape[0] != student_inputs.shape[0]:
+                    raise ValueError(f"teacher/student capture count differs for {name}")
+                statistics["hh"].addmm_(teacher_inputs.T, teacher_inputs)
+                statistics["hphp"].addmm_(student_inputs.T, student_inputs)
+                statistics["hph"].addmm_(teacher_inputs.T, student_inputs)
+                del teacher_inputs, student_inputs
         left = None if left_whiteners is None else left_whiteners.get(name)
         factors = combined_input_factors_consuming(
             teacher_linear.weight,
@@ -149,7 +166,7 @@ def compress_sequentially(
         if callbacks.checkpoint is not None and checkpoint_every and since_checkpoint >= checkpoint_every:
             callbacks.checkpoint(student, done)
             since_checkpoint = 0
-        if callbacks.capture_pairs is None:
+        if callbacks.capture_statistics is None and callbacks.capture_pairs is None:
             del teacher_batches, student_batches
         del statistics, factors, current
         if target.type == "cuda":
@@ -160,6 +177,23 @@ def compress_sequentially(
     if callbacks.checkpoint is not None:
         callbacks.checkpoint(student, done)
     return student.cpu()
+
+
+def _as_2d_covariance(
+    covariance: torch.Tensor,
+    in_features: int,
+    device: torch.device,
+    name: str,
+) -> torch.Tensor:
+    """Validate a model-specific covariance before consuming it in SVD."""
+    if not torch.is_tensor(covariance):
+        raise TypeError(f"adapter statistic {name} must be a tensor")
+    if covariance.shape != (in_features, in_features):
+        raise ValueError(
+            f"adapter statistic {name} has shape {tuple(covariance.shape)}, "
+            f"expected {(in_features, in_features)}"
+        )
+    return covariance.detach().to(device=device, dtype=torch.float64)
 
 
 @torch.no_grad()
