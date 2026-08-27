@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -39,5 +40,7 @@ class PipelineTest(unittest.TestCase):
 
             self.assertEqual(partial_checkpoint.read_text(), "partial")
             self.assertTrue((run_dir / "manifest.json").is_file())
+            manifest = json.loads((run_dir / "manifest.json").read_text())
+            self.assertEqual(manifest["safe_svd_config"]["rank_selector"], "safe")
             for child in ("cache", "ranks", "compressed", "evaluation"):
                 self.assertTrue((run_dir / child).is_dir())

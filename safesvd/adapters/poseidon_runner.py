@@ -29,6 +29,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--final_time", type=int, default=15)
     result.add_argument("--time_back", type=int, default=0)
     result.add_argument("--rank_ratio", type=float, required=True)
+    result.add_argument("--rank-selector", choices=("safe", "legacy"), default="safe")
     result.add_argument("--DEV", default="cuda")
     result.add_argument("--use_fisher", choices=("y", "n"), default="y")
     result.add_argument("--use_prev_time", choices=("True", "False"), default="False")
@@ -56,6 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         model_name=args.model_name, dataset=args.dataset, traj_num=args.traj_num,
         calibration_seed=args.calibration_seed,
         final_time=args.final_time, time_back=args.time_back, rank_ratio=args.rank_ratio, device=args.DEV,
+        rank_selector=args.rank_selector,
         use_fisher=args.use_fisher == "y", use_prev_time=args.use_prev_time == "True",
         balance_ratio=args.balance_ratio, order_control=args.order_control,
         gradient_loss=args.gradient_loss, alpha=args.alpha, fast=args.fast, overwrite=args.overwrite_cache,

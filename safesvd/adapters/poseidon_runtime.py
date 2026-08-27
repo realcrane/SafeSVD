@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader, Dataset, Subset
 
 from safesvd.core import (
     CompressionCallbacks,
-    allocate_greedy_ranks,
+    allocate_ranks,
     compress_clean_input,
     compress_sequentially,
     svd_whitener,
@@ -50,6 +50,7 @@ class PoseidonOptions:
     final_time: int
     time_back: int
     rank_ratio: float
+    rank_selector: str
     device: str
     use_fisher: bool
     use_prev_time: bool
@@ -73,9 +74,9 @@ class PoseidonOptions:
     @property
     def rank_path(self) -> Path:
         return (
-            self.rank_root / self.model_name / self.dataset / "MySVD_origin_Rank"
+            self.rank_root / self.model_name / self.dataset / self.rank_selector
             / f"{self.calibration_tag}_order{self.order_control}_{self.gradient_loss}"
-            / f"rank_{self.rank_ratio}_origin.json"
+            / f"rank_{self.rank_ratio}.json"
         )
 
     @property
@@ -387,11 +388,13 @@ def _load_or_collect_fisher(options: PoseidonOptions, trainer, calibration_data,
 
 
 def run_poseidon(options: PoseidonOptions) -> Path:
-    """Select ranks and compress a Poseidon model using the origin objective."""
+    """Select ranks and compress a Poseidon model using the configured selector."""
     if options.traj_num <= 0:
         raise ValueError("traj_num must be positive")
     if options.final_time <= options.time_back:
         raise ValueError("final_time must be greater than time_back")
+    if options.rank_selector not in {"legacy", "safe"}:
+        raise ValueError("rank_selector must be one of: legacy, safe")
     helpers = _imports(options)
     target_time = options.final_time - options.time_back
     calibration_data = build_calibration_dataset(
@@ -424,8 +427,15 @@ def run_poseidon(options: PoseidonOptions) -> Path:
     if options.rank_path.is_file() and not options.overwrite:
         ranks = json.loads(options.rank_path.read_text())
     else:
-        print("Selecting ranks from Fisher and activation profiles", flush=True)
-        ranks = allocate_greedy_ranks(trainer.model, fisher, profile, options.rank_ratio, options.device)
+        print(f"Selecting ranks with {options.rank_selector!r} selector", flush=True)
+        ranks = allocate_ranks(
+            trainer.model,
+            fisher,
+            profile,
+            options.rank_ratio,
+            options.device,
+            selector=options.rank_selector,
+        )
         options.rank_path.parent.mkdir(parents=True, exist_ok=True)
         options.rank_path.write_text(json.dumps(ranks, indent=2) + "\n")
     _release_cuda_stage(trainer, options.device)
@@ -487,7 +497,7 @@ def run_poseidon(options: PoseidonOptions) -> Path:
             initial_student=initial_student,
             compressed_layers=compressed_layers,
         )
-    final_path = options.save_path / "compressed_model_origin.pt"
+    final_path = options.save_path / "compressed_model.pt"
     torch.save(model, final_path)
     if checkpoint_path.exists():
         checkpoint_path.unlink()

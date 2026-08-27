@@ -39,6 +39,7 @@ class PoseidonAdapter(Adapter):
             "--cache-root", str(artifacts.cache_root),
             "--DEV", request.device,
             "--rank_ratio", str(request.config.rank_ratio),
+            "--rank-selector", request.config.rank_selector,
             "--traj_num", str(request.config.calibration_size),
             "--alpha", str(request.config.alpha),
             *( ("--overwrite_cache",) if request.config.overwrite else () ),

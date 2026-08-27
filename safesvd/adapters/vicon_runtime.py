@@ -43,7 +43,7 @@ from safesvd.adapters.vicon_attention import (
     patched_vicon_fisher_forward,
 )
 from safesvd.adapters.vicon_physics import SOBOLEV_ORDERS, average_metrics, physics_metrics
-from safesvd.core import CompressionCallbacks, allocate_greedy_ranks, compress_clean_input, compress_sequentially
+from safesvd.core import CompressionCallbacks, allocate_ranks, compress_clean_input, compress_sequentially
 
 
 @dataclass(frozen=True)
@@ -56,6 +56,7 @@ class ViconOptions:
     fisher_path: Path
     rank_path: Path
     rank_ratio: float
+    rank_selector: str
     calibration_size: int
     calibration_seed: int
     alpha: float
@@ -221,6 +222,8 @@ def run_vicon(options: ViconOptions) -> Path:
             "checkpoint": str(options.model_path),
             "data_root": str(options.data_path),
             "alpha": options.alpha,
+            "rank_ratio": options.rank_ratio,
+            "rank_selector": options.rank_selector,
         },
     )
     if in_progress.exists():
@@ -557,7 +560,14 @@ def _load_or_select_ranks(
 ) -> dict[str, int | None]:
     if options.rank_path.is_file() and not options.overwrite:
         return json.loads(options.rank_path.read_text())
-    ranks = allocate_greedy_ranks(model, fisher, profile, options.rank_ratio, options.device)
+    ranks = allocate_ranks(
+        model,
+        fisher,
+        profile,
+        options.rank_ratio,
+        options.device,
+        selector=options.rank_selector,
+    )
     options.rank_path.parent.mkdir(parents=True, exist_ok=True)
     options.rank_path.write_text(json.dumps(ranks, indent=2) + "\n")
     return ranks
@@ -648,6 +658,8 @@ def _validate_options(options: ViconOptions) -> None:
         )
     if not 0 < options.rank_ratio <= 1:
         raise ValueError("rank_ratio must be in (0, 1]")
+    if options.rank_selector not in {"legacy", "safe"}:
+        raise ValueError("rank_selector must be one of: legacy, safe")
     if not 0 <= options.alpha <= 1:
         raise ValueError("alpha must be in [0, 1]")
     if not options.model_path.is_file():

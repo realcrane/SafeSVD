@@ -23,6 +23,7 @@ def parser() -> argparse.ArgumentParser:
     compress.add_argument("--fisher-path", type=Path, required=True)
     compress.add_argument("--rank-path", type=Path, required=True)
     compress.add_argument("--rank-ratio", type=float, required=True)
+    compress.add_argument("--rank-selector", choices=("safe", "legacy"), default="safe")
     compress.add_argument("--calibration-size", type=int, required=True)
     compress.add_argument("--calibration-seed", type=int, required=True)
     compress.add_argument("--alpha", type=float, required=True)
@@ -81,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
             fisher_path=args.fisher_path.expanduser().resolve(),
             rank_path=args.rank_path.expanduser().resolve(),
             rank_ratio=args.rank_ratio,
+            rank_selector=args.rank_selector,
             calibration_size=args.calibration_size,
             calibration_seed=args.calibration_seed,
             alpha=args.alpha,

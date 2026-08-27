@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class SafeSVDConfig:
     rank_ratio: float
     calibration_size: int
     calibration_seed: int
+    rank_selector: Literal["safe", "legacy"] = "safe"
     source_root: Path | None = None
     device: str = "cuda"
     alpha: float = 0.7
@@ -36,6 +38,8 @@ class SafeSVDConfig:
             raise ValueError("v0 currently exposes only the paper preset")
         if not 0 < self.rank_ratio <= 1:
             raise ValueError("rank_ratio must be in (0, 1]")
+        if self.rank_selector not in {"legacy", "safe"}:
+            raise ValueError("rank_selector must be one of: legacy, safe")
         if self.calibration_size <= 0:
             raise ValueError("calibration_size must be positive")
         if not 0 <= self.alpha <= 1:

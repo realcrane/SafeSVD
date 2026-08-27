@@ -37,6 +37,7 @@ class VICONAdapter(Adapter):
             "--rank-path", str(rank_dir / "ranks.json"),
             "--device", request.device,
             "--rank-ratio", str(request.config.rank_ratio),
+            "--rank-selector", request.config.rank_selector,
             "--calibration-size", str(request.config.calibration_size),
             "--calibration-seed", str(request.config.calibration_seed),
             "--alpha", str(request.config.alpha),
@@ -89,7 +90,7 @@ class VICONAdapter(Adapter):
     def _artifact_dirs(self, request: RunRequest) -> tuple[Path, Path]:
         key = _cache_key(request, self.source_root(request))
         artifacts = BackendArtifactLayout(request.repo_root, self.name)
-        return artifacts.cache_root / key, artifacts.rank_root / key
+        return artifacts.cache_root / key, artifacts.rank_root / request.config.rank_selector / key
 
 
 def _cache_key(request: RunRequest, source_root: Path) -> str:

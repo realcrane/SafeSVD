@@ -29,8 +29,8 @@ class PoseidonEvaluationTest(unittest.TestCase):
         sys.path.insert(0, str(EVALUATION_DIR))
         from evaluate import default_output_path
 
-        model = Path("/tmp/artifacts/poseidon/paper/0.2/dataset/traj64_ftime20/compressed/compressed_model_origin.pt")
+        model = Path("/tmp/artifacts/poseidon/paper/safe/0.2/dataset/traj64_ftime20/compressed/compressed_model.pt")
         self.assertEqual(
             default_output_path(Path("/tmp/checkpoint"), model),
-            Path("/tmp/artifacts/poseidon/paper/0.2/dataset/traj64_ftime20/metrics.json"),
+            Path("/tmp/artifacts/poseidon/paper/safe/0.2/dataset/traj64_ftime20/metrics.json"),
         )

@@ -28,6 +28,12 @@ def parser() -> argparse.ArgumentParser:
         help="External source checkout for the selected backend (defaults to ./poseidon, ./vicon, or ./mpp).",
     )
     compress_parser.add_argument("--rank-ratio", type=float, required=True)
+    compress_parser.add_argument(
+        "--rank-selector",
+        choices=("safe", "legacy"),
+        default="safe",
+        help="Rank allocator: budget-consistent SAFE-SVD (default) or the MySVD-compatible legacy route.",
+    )
     compress_parser.add_argument("--calibration-size", type=int, required=True)
     compress_parser.add_argument(
         "--calibration-seed",
@@ -97,6 +103,7 @@ def default_output_dir(args: argparse.Namespace) -> Path:
             / "artifacts"
             / "poseidon"
             / args.preset
+            / args.rank_selector
             / str(args.rank_ratio)
             / args.dataset
             / poseidon_calibration_tag(
@@ -106,7 +113,7 @@ def default_output_dir(args: argparse.Namespace) -> Path:
             )
         )
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return PROJECT_DIR / "artifacts" / args.model / args.preset / timestamp
+    return PROJECT_DIR / "artifacts" / args.model / args.preset / args.rank_selector / timestamp
 
 
 def default_checkpoint(model: str) -> Path:
@@ -150,17 +157,17 @@ def _validate_backend_extra(model: str, extra: tuple[str, ...], *, evaluation: b
     reserved = {
         "poseidon": {
             "--repo-root", "--poseidon-root", "--model_path", "--data_path", "--save_path",
-            "--rank-root", "--cache-root", "--DEV", "--rank_ratio", "--traj_num", "--alpha", "--overwrite_cache",
+            "--rank-root", "--cache-root", "--DEV", "--rank_ratio", "--rank-selector", "--traj_num", "--alpha", "--overwrite_cache",
         },
         "vicon": {
             "--vicon-root", "--model-path", "--data-path", "--save-path", "--profile-path",
             "--fisher-path", "--rank-path", "--device", "--rank-ratio", "--calibration-size",
-            "--calibration-seed", "--alpha", "--overwrite",
+            "--calibration-seed", "--rank-selector", "--alpha", "--overwrite",
         },
         "mpp": {
             "--mpp-root", "--model-path", "--data-path", "--save-path", "--profile-path",
             "--fisher-path", "--rank-path", "--device", "--rank-ratio", "--calibration-size",
-            "--calibration-seed", "--alpha", "--overwrite",
+            "--calibration-seed", "--rank-selector", "--alpha", "--overwrite",
         },
     }
     if evaluation:
@@ -230,6 +237,7 @@ def main(argv: list[str] | None = None) -> int:
         rank_ratio=args.rank_ratio,
         calibration_size=args.calibration_size,
         calibration_seed=calibration_seed,
+        rank_selector=args.rank_selector,
         source_root=args.source_root,
         alpha=args.alpha,
         device=args.device,

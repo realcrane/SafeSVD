@@ -31,6 +31,7 @@ class PublicInterfaceTest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(f"SAFE-SVD {model}/paper", result.stdout)
+            self.assertIn("--rank-selector safe", result.stdout)
             expected_route = f"safesvd.adapters.{model}_runner"
             self.assertIn(expected_route, result.stdout)
 
@@ -81,14 +82,37 @@ class PublicInterfaceTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(
-            "artifacts/poseidon/paper/0.2/fluids.incompressible.PiecewiseConstants/"
+            "artifacts/poseidon/paper/safe/0.2/fluids.incompressible.PiecewiseConstants/"
             "traj64_seed7_ftime20",
             result.stdout,
         )
         self.assertIn("--calibration_seed 7", result.stdout)
 
+    def test_legacy_selector_has_distinct_output_and_rank_paths(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "safesvd.cli", "compress",
+                "--model", "vicon",
+                "--checkpoint", "/tmp/vicon-weights",
+                "--data-root", "/tmp/vicon-data",
+                "--rank-ratio", "0.2",
+                "--rank-selector", "legacy",
+                "--calibration-size", "128",
+                "--dry-run",
+            ],
+            cwd=PROJECT_DIR,
+            env={"PYTHONPATH": str(PROJECT_DIR), "PYTHONDONTWRITEBYTECODE": "1"},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("artifacts/vicon/paper/legacy/", result.stdout)
+        self.assertIn("ranks/vicon/legacy/", result.stdout)
+        self.assertIn("--rank-selector legacy", result.stdout)
+
     def test_poseidon_unified_evaluation_preserves_run_root_metrics_path(self) -> None:
-        model = "/tmp/artifacts/poseidon/paper/0.2/dataset/traj64/compressed/compressed_model_origin.pt"
+        model = "/tmp/artifacts/poseidon/paper/safe/0.2/dataset/traj64/compressed/compressed_model.pt"
         result = subprocess.run(
             [
                 sys.executable, "-m", "safesvd.cli", "evaluate",
@@ -105,7 +129,7 @@ class PublicInterfaceTest(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        expected = Path("/tmp/artifacts/poseidon/paper/0.2/dataset/traj64/metrics.json").resolve()
+        expected = Path("/tmp/artifacts/poseidon/paper/safe/0.2/dataset/traj64/metrics.json").resolve()
         self.assertIn(f"Output: {expected}", result.stdout)
 
     def test_backend_extra_cannot_override_public_paths(self) -> None:

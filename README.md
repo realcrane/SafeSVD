@@ -89,6 +89,7 @@ python -m safesvd.cli compress \
   --checkpoint /path/to/models/poseidon/Poseidon-L-finetuned \
   --data-root /path/to/SAFE-SVD-v0/poseidon/camlab-ethz/down_streams \
   --rank-ratio 0.2 \
+  --rank-selector safe \
   --calibration-size 64 \
   --dataset fluids.incompressible.PiecewiseConstants \
   --final-time 20 \
@@ -97,19 +98,30 @@ python -m safesvd.cli compress \
   --fast
 ```
 
-The default output path is addressed by the compression settings, for example
-`artifacts/poseidon/paper/0.2/fluids.incompressible.PiecewiseConstants/traj64_default_ftime20/`.
+The default output path is addressed by the selector and compression settings,
+for example
+`artifacts/poseidon/paper/safe/0.2/fluids.incompressible.PiecewiseConstants/traj64_default_ftime20/`.
 For Poseidon, `--calibration-seed -1` uses the fixed prefix of training
 trajectories. Pass a non-negative seed, such as `--calibration-seed 7`, to
 sample a reproducible, different set of complete trajectories; its output
 directory is `traj64_seed7_ftime20`.
 
+`--rank-selector safe` is the default. It charges every mandatory rank-one
+factor before allocation, admits only integer ranks that strictly save
+parameters, and compares each next singular direction with an explicit
+full-rank tail-energy transition. Use `--rank-selector legacy` only to
+reproduce the former MySVD-compatible allocation.
+
 Poseidon compression always uses MySVD_fast's 512-sample activation-capture
 chunk and consumes each teacher/student pair before capturing the next one.
 `--fast` is retained as a no-op compatibility flag. Persistent artifacts are backend-scoped:
-`ranks/poseidon/`, `cache/poseidon/`, and the run-local `compressed/` folder.
-Future routes use the equivalent `ranks/vicon`, `ranks/mpp`, `cache/vicon`,
-and `cache/mpp` roots. SAFE-SVD imports only public `scOT.*` modules and keeps
+`ranks/poseidon/{safe,legacy}/`, `cache/poseidon/`, and the run-local
+`compressed/` folder. Rank files are selector-scoped so legacy ranks cannot be
+reused by the budget-consistent SAFE selector; profiling and Fisher caches stay
+shared because selector choice does not change those statistics.
+The VICON and MPP routes use the equivalent `ranks/vicon/{safe,legacy}`,
+`ranks/mpp/{safe,legacy}`, `cache/vicon`, and `cache/mpp` roots. SAFE-SVD
+imports only public `scOT.*` modules and keeps
 all Fisher, calibration, rank-selection, and low-rank replacement code inside
 SAFE-SVD; the `poseidon/` source tree is never edited.
 
@@ -124,7 +136,7 @@ python evaluation/poseidon/evaluate.py \
   --poseidon-root ./poseidon \
   --data-root ./poseidon/camlab-ethz/down_streams \
   --checkpoint /path/to/original-finetuned-checkpoint \
-  --model /path/to/run/compressed/compressed_model_origin.pt \
+  --model /path/to/run/compressed/compressed_model.pt \
   --dataset fluids.incompressible.PiecewiseConstants
 ```
 
@@ -214,10 +226,9 @@ compression to three scientific foundation models:
 | `vicon` | VICON | SAFE-SVD Hugging Face model repository | Paper-reproduction reference |
 | `mpp` | Multiple Physics Pretraining (MPP) | SAFE-SVD Hugging Face model repository | Paper-reproduction reference |
 
-`v0` is intentionally a **paper-compatible release**. The optimized
-`MySVD_fast` implementation and the new SAFE rank-selection method will be
-added later as explicitly labelled optional presets; neither silently changes
-the paper route.
+The public route exposes both the budget-consistent `safe` rank selector and
+the MySVD-compatible `legacy` selector. Selector names are recorded in run
+manifests and artifact paths so published recipes remain reproducible.
 
 ## Repository policy
 
@@ -277,9 +288,8 @@ backends/vicon/paper/
 backends/mpp/paper/
 ```
 
-Poseidon's improved SAFE rank-selection and accelerated compression source is
-preserved separately at `backends/poseidon/safe_rank/`; it is not the
-default `paper` route.
+The improved SAFE rank-selection is implemented in the shared
+`safesvd.core.ranks` module and is used consistently by all three adapters.
 
 Install the lightweight routing package from this directory:
 
