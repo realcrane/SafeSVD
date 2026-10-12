@@ -15,9 +15,9 @@ The resulting structure is `SAFE-SVD-v0/poseidon/`,
 `SAFE-SVD-v0/mpp/multiple_physics_pretraining/`.  ViCON needs the full
 upstream checkout containing `VICON/src` and `VICON/configs`; MPP needs the
 full checkout containing `multiple_physics_pretraining/models/avit.py`.
-The small research snapshots under `physic_model_comp/` do not contain those
-gitignored model-source directories, so they are useful as a reference but
-cannot run the adapters on their own.
+These are official upstream source dependencies, not directories to copy from
+another research repository. The VICON/MPP dataset section below gives the
+clone commands and pinned revisions used by the independent preparation helper.
 
 ### Environment
 ```bash
@@ -46,18 +46,275 @@ We provide python files to downlaod poseidon downstream datasets, run
 python downloads/poseidon/datasets/downstreams.py
 ```
 
-### VICON
-Download and unpack the data following the upstream ViCON instructions, then
-pass its root through `--data-root`.  The adapter applies that root to the
-Hydra dataset configuration.  If a configuration uses non-standard field
-names, pass one or more upstream Hydra overrides after `--`, for example
-`-- --config-override datasets.NS2D.path=/datasets/vicon/ns2d`.
+### VICON and MPP: from official sources, without a research checkout
 
-### MPP
-Download and unpack the data following the upstream Multiple Physics
-Pretraining instructions, then pass the parent data directory through
-`--data-root`.  SAFE-SVD rebases the `train_data_paths` and `valid_data_paths`
-in MPP's YAML under that directory.
+This workflow starts with this repository and public upstream sources. It does
+not require SMC, another user's data directory, or hard-linked research assets.
+Model weights are a separate download from `Evave7/SAFE-SVD`; they are not
+downloaded by the dataset commands below.
+
+#### 1. Get the pinned official source repositories
+
+Run these Bash commands at the SAFE-SVD repository root. If a target checkout
+already exists, inspect it instead of overwriting it. The helper rejects a
+different revision or tracked local modifications to these upstream sources.
+
+```bash
+git clone https://github.com/Eydcao/VICON.git vicon/VICON
+git -C vicon/VICON checkout --detach be2e2dc6b327259c55b110340c3b55e30a427317
+git clone https://github.com/PolymathicAI/multiple_physics_pretraining.git mpp/multiple_physics_pretraining
+git -C mpp/multiple_physics_pretraining checkout --detach e751fc25ae5274c3ddc869bf73afd6fcd4163cb5
+git clone https://github.com/pdebench/PDEBench.git data/upstream/PDEBench
+git -C data/upstream/PDEBench checkout --detach 4ff3e3a4aa1561721b5571fa3a048a0a463e0568
+```
+
+Install Git LFS using your platform's package manager. The data workflow needs
+Python with `h5py`, `numpy`, `pandas`, `tqdm`, and a compatible `torch` /
+`torchvision` pair; PDEBench's original downloader imports torchvision.
+This step does not install all dependencies needed for model compression.
+
+```bash
+python -m pip install h5py numpy pandas tqdm
+git lfs version
+python -c 'from torchvision.datasets.utils import download_url; import h5py, numpy, pandas, tqdm'
+python downloads/datasets/prepare_official.py plan
+```
+
+#### 2. Download the original PDEBench files
+
+The [MPP repository](https://github.com/PolymathicAI/multiple_physics_pretraining)
+defines dataset paths, loader types, filters, and an 80%/10%/10% sample split in
+its `basic_config`. It does not provide a separate turnkey download command.
+Its AViT-L configuration uses shallow-water, incompressible NS, compressible
+CFD Rand (128 and 512), CFD Turb, and diffusion-reaction. Follow the
+[PDEBench download instructions](https://github.com/pdebench/PDEBench/blob/4ff3e3a4aa1561721b5571fa3a048a0a463e0568/pdebench/data_download/README.md)
+for these sources:
+
+```bash
+python downloads/datasets/prepare_official.py download-pdebench
+```
+
+This uses the **unmodified official** `parse_metadata` and `download_url`
+functions for `2d_cfd`, `ns_incom`, `swe`, and `2d_reacdiff`. Metadata selection
+runs in `data/upstream/PDEBench/pdebench/data_download`, because the official
+script reads its CSV relative to the current directory. Files are downloaded
+to `data/official/mpp/PDEBench_data` with the original MD5 check intact.
+
+The SAFE-SVD wrapper adds up to three attempts per file (60 seconds between
+attempts), retains failed files in `data/official/quarantine/pdebench`, and
+writes a receipt only after the original checksum check passes. Unchanged
+verified files can be reused on restart; changing their size, modification
+time, inode, or device invalidates the receipt. Two attempts with the same
+wrong checksum stop retries for that file, while other files continue. Any
+unresolved failure makes the stage fail; five failed files stop the stage
+early for investigation. The upstream source checkout is not edited.
+
+The pinned complete `2d_cfd` manifest has **17 files**, not only the 8 Rand/Turb
+files selected by the training config. The complete raw download therefore
+has **293 files**: 17 CFD + 274 NS + 1 shallow-water + 1 diffusion-reaction.
+The NS manifest has no `ns_incom_inhom_2d_512-49.h5`; do not invent a missing URL.
+
+**Capacity:** this is a multi-TB download, not a quick setup command. Check disk
+space and quota first, allow additional space for VICON conversions and Git LFS
+storage, and use tmux for long-running stages. Retained failures also use disk
+space. The wrapper retries whole files and reuses verified receipts; it does
+not add HTTP range resume to PDEBench's downloader.
+
+#### 3. Download VICON's PDEArena data with Git LFS
+
+The [VICON preparation guide](https://github.com/Eydcao/VICON/blob/be2e2dc6b327259c55b110340c3b55e30a427317/dataset_prepare/README.md)
+uses `pdearena/NavierStokes-2D-conditoned` and excludes a known corrupted file.
+
+```bash
+python downloads/datasets/prepare_official.py download-pdearena
+```
+
+The wrapper clones that official dataset repository with Git LFS smudging
+initially disabled, checks out revision
+`777ab1693937a050f4e22c271c4c4797b24952ab`, then runs `git lfs pull` for HDF5 files
+except `NavierStokes2D_train_496019_0.38774_32.h5`. Instead of downloading and
+deleting the known-bad payload, it retains the small excluded LFS pointer in
+`data/official/excluded/`, outside the loader directory. This yields 116 usable
+NS2D files (78 train / 19 valid / 19 test), materialized as regular files.
+
+#### 4. Run VICON's original conversion and splitting functions
+
+```bash
+python downloads/datasets/prepare_official.py preprocess-vicon --split-seed 0
+```
+
+The wrapper calls, in order, the original functions in
+`convert_PDEBench_highVis.py`, `convert_PDEBench_lowVis.py`, and
+`split_PDEBench.py`; it supplies paths rather than editing their hard-coded
+example paths. The algorithms are not reimplemented:
+
+- High viscosity: 128-resolution Rand files, 500 trajectories per block.
+- Low viscosity: 512-resolution Rand and Turb files, the upstream 4-by-4 spatial
+  mean to 128 resolution, 50 trajectories per block.
+- Each category: 80 blocks, divided into 64 train / 8 valid / 8 test files.
+
+The original split script does not fix a random seed. The wrapper seeds NumPy
+and records the actual split-to-original-block mapping in each category's
+`conversion_receipt.json`. A seed alone does not fix filesystem glob order,
+and a fresh split is **not claimed to reproduce the original paper's exact
+split**. Keep the mapping when comparing experiments. Existing conversions
+are never silently overwritten or reshuffled; failed staging directories are
+retained for inspection. The upstream converters can require several GB of RAM.
+
+#### 5. Adapt MPP's paths and verify the prepared files
+
+```bash
+python downloads/datasets/prepare_official.py write-mpp-config
+python downloads/datasets/prepare_official.py verify
+```
+
+MPP's official AViT-L YAML uses `~/PDEBench/...`, not this repository's data
+layout. `write-mpp-config` creates `data/official/configs/mpp_avit_L.yaml` by
+changing only the six training and six validation root paths in `basic_config`.
+The model architecture, data categories, filters, and split fractions remain
+unchanged. The upstream checkout is not edited.
+
+`verify` requires current full-MD5 download receipts for all 293 PDEBench files
+and computes the SHA-256 of each of the 116 materialized PDEArena files against
+its pinned Git LFS pointer. It also checks HDF5 readability, VICON converted
+field shapes, split counts, and finite first/last trajectory endpoint fields.
+It expects 293 raw PDEBench + 116 PDEArena + 160 converted CFD files,
+**569 HDF5 files in total**. These checks do not inspect every physical value
+or test model accuracy. Successful stages append provenance to
+`data/official/official_preparation.jsonl`; a failed stage is not recorded as
+successful.
+
+#### Output layout and compression configuration
+
+All stages accept `--data-root /absolute/new/output` to change the output root;
+use the same value for every stage. The default `data/official` keeps any older
+server-prepared data separate and never treats those files as a completed fresh
+download.
+
+```text
+data/official/
+├── mpp/PDEBench_data/2D/                     # official raw downloads
+├── vicon/VICON/NavierStokes-2D-conditoned/   # official Git LFS checkout
+├── vicon/VICON/PDEBench/2D/CFD/converted/
+│   ├── 2D_Train_Rand/{train,valid,test}/
+│   └── 2D_Train_Turb/{train,valid,test}/
+├── configs/mpp_avit_L.yaml
+└── official_preparation.jsonl
+```
+
+For MPP, use `--data-root /path/to/SAFE-SVD-v0/data/official/mpp` and append
+`-- --yaml-config /path/to/SAFE-SVD-v0/data/official/configs/mpp_avit_L.yaml`
+to the top-level compression/evaluation command. Select `basic_config`.
+
+For VICON, use `--data-root /path/to/SAFE-SVD-v0/data/official/vicon` and append
+the following upstream overrides after `--`. The current adapter does not
+automatically rebase the `folder` fields:
+
+```text
+--config-override datasets.types.NS2D.folder=/path/to/SAFE-SVD-v0/data/official/vicon/VICON/NavierStokes-2D-conditoned
+--config-override datasets.types.COMPRESSIBLE2D.folder=/path/to/SAFE-SVD-v0/data/official/vicon/VICON/PDEBench/2D/CFD/converted/2D_Train_Rand
+--config-override datasets.types.EULER2D.folder=/path/to/SAFE-SVD-v0/data/official/vicon/VICON/PDEBench/2D/CFD/converted/2D_Train_Turb
+```
+
+To run the small-grid offline integration tests against the official functions:
+
+```bash
+python downloads/datasets/test_prepare_official.py
+python downloads/datasets/test_pdebench_retry.py
+python downloads/datasets/test_diagnose_pdebench_download.py
+python downloads/datasets/test_verify_official.py
+python downloads/datasets/test_resume_after_diagnosis.py
+```
+
+If a full-size file fails MD5 validation, retain it and independently download
+the same official object to new paths for comparison:
+
+```bash
+python downloads/datasets/diagnose_pdebench_download.py \
+  --manifest data/upstream/PDEBench/pdebench/data_download/pdebench_data_urls.csv \
+  --filename '<exact filename from the manifest>' \
+  --previous-md5 '<MD5 calculated for the first failed copy>' \
+  --output /absolute/new/independent-copy.hdf5 \
+  --report /absolute/new/diagnosis.json
+```
+
+The diagnostic records the incoming-byte MD5 separately from a full reread of
+the persisted file. It also attempts an S3 multipart ETag comparison, which
+is evidence only when the computed ETag exactly matches. It does not overwrite
+the original copy or accept a file with the wrong published checksum.
+Transient HTTP/TLS errors can resume within the same running process; the
+server must return the exact requested range and the same object ETag. Use
+`--network-retries` and `--retry-delay` to configure this bounded retry policy.
+A failed process retains its partial copy and failure report; use new paths
+for a new independent attempt.
+
+For the default `data/official` layout, `resume_after_diagnosis.py` can wait
+for the report and continue preparation automatically. It accepts only a
+complete independent transfer whose incoming and persisted MD5 both equal
+the original manifest value, retains the first copy in quarantine, and writes
+a verification receipt before starting the full pipeline. Its
+`--diagnostic-status` input is the companion task-status file generated by the
+`downloads/datasets/run_logged_task.sh`; `--run-dir` must be an unused absolute
+log directory. For example, inside a persistent tmux session, use an explicit
+Bash interpreter (also on servers whose login shell is csh):
+
+```bash
+/bin/bash downloads/datasets/run_logged_task.sh diagnosis "$PWD/logs/diagnosis-1" \
+  python downloads/datasets/diagnose_pdebench_download.py \
+  --manifest data/upstream/PDEBench/pdebench/data_download/pdebench_data_urls.csv \
+  --filename '<exact filename from the manifest>' \
+  --output /absolute/new/independent-copy.hdf5 \
+  --report /absolute/new/diagnosis.json
+# Companion status: logs/diagnosis-1/status.diagnosis.txt
+```
+
+Unexpected or mismatching results stop this controller for investigation.
+
+To run the complete sequence in a persistent terminal, after the source and
+environment setup above, use the following Bash wrapper. The log directory
+must not already exist. This command downloads the full multi-TB dataset; it
+does **not** remove existing data and does not start compression.
+
+```bash
+tmux new -s official-data
+bash downloads/datasets/run_official_pipeline.sh "$(command -v python)" "$PWD/logs/official-data-run-1"
+```
+
+Create the `logs` parent directory first if it is absent. The wrapper runs the
+offline tests, then the download, conversion, configuration, and verification
+stages in sequence. It stops on the first failure. Check `status.txt` and
+`pipeline.log` in the chosen log directory; only a final `SUCCESS` means that
+all preparation stages and the structural check passed. It is not a model
+loading or compression-accuracy test. Re-running with a new log directory
+uses the upstream downloaders' existing-file checks; it is not automatically
+a clean download. Incomplete conversion directories still require inspection.
+
+**Validation boundary:** a successful plan, dependency check, or small-grid test
+is not a full dataset download or a compression test. Only report full data
+preparation after all download, conversion, and verification stages succeed.
+Older server reuse records (`data/vicon_mpp_manifest.json`, or archived copies
+under `data/preparation_history/`) are migration records, not evidence that
+this clean-source workflow has completed.
+
+**Recovery record (2026-10-10):** the first complete copy of official PDEBench
+object `164688` had MD5 `a0511a3b532c4fb4814e895b5d888c0a`, independently
+reproduced by reading the same file on two hosts. A subsequent independent
+transfer on `barnacle` failed with `DECRYPTION_FAILED_OR_BAD_RECORD_MAC` and
+was retained. On `crested`, both the complete received bytes and a complete
+post-write disk reread matched the original manifest MD5
+`b2733888745a1d64e36df813e979910b`; its multipart ETag also matched the server.
+The source checksum is therefore not the cause of this failure. The exact
+low-level cause of the first corrupted copy remains unproven; a TLS error on
+another attempt alone does not establish that cause. The controller preserved
+the first copy in `data/official/quarantine/first_attempt/`, promoted only the
+fully verified independent copy, and resumed preparation. Evidence is in
+`data/official/diagnostics/164688/attempt3_crested.json` and
+`logs/data_official_recovery_20261010/`; the active full pipeline uses
+`logs/data_official_full_resume_20261010/`. A later read-only check confirmed
+that `barnacle` rebooted, interrupting its PDEArena transfer; its old `RUNNING`
+status is stale. The full pipeline resumes missing Git LFS objects using the
+same pinned official checkout. This recovery record is not a claim that all
+datasets or loader checks have finished.
 
 ## Foundation and Finetuned Model Downloads
 We have totally n finetuned poseidon models, and one VICON and MPP foundation model for user to easy strat compression. Please run the command below for downloads.
