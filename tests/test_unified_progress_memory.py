@@ -113,6 +113,24 @@ class ProgressMemoryTests(unittest.TestCase):
         self.assertTrue(eye.call_args_list)
         self.assertTrue(all(call.args[0] == 4 for call in eye.call_args_list))
 
+    def test_eager_covariance_release_matches_existing_factorization(self):
+        from safe_svd.compress import compress
+        from safesvd.core.factorization import combined_input_factors_consuming
+        torch.manual_seed(719)
+        model = nn.Sequential(nn.Linear(4, 6)).double()
+        h, hp = torch.randn(12, 4).double(), torch.randn(12, 4).double()
+        left = torch.diag(torch.arange(1, 7).double())
+        metric = (left, torch.linalg.inv(left))
+        def capture(context, name):
+            yield "data", h, hp
+        for alpha in (0., 0.7, 1.):
+            stats = {"hh": h.T @ h / 12, "hph": h.T @ hp / 12, "hphp": hp.T @ hp / 12}
+            expected = combined_input_factors_consuming(model[0].weight, stats, 2, alpha=alpha, left_whitener=metric)
+            student = compress(model, [], {"0": 2}, model_type="mpp", device="cpu", alpha=alpha,
+                               left_metrics={"0": metric}, capture_fn=capture, progress=False)
+            torch.testing.assert_close(student[0][1].weight @ student[0][0].weight,
+                                       expected.left @ expected.right, rtol=1e-8, atol=1e-9)
+
 
 if __name__ == "__main__":
     unittest.main()

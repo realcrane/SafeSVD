@@ -50,7 +50,7 @@
 | `--capture_batch_size` | `64` | Poseidon compression 每次传给采集 rollout 的数据切片大小，按 dataset **样本**计，不是轨迹。实际一次前向通常不超过它与 Trainer batch_size 的较小值。MPP/VICON 不使用此项。 |
 | `--dataset_workers` | VICON：cfg.dataset_workers | VICON 校准 DataLoader 工作进程数，非负整数。MPP 使用 params.num_data_workers；当前 Poseidon profiling、Fisher 和 capture 使用 0 worker。 |
 | `--DEV` / `--device` | `cuda` | 计算设备，例如 cuda、cuda:0、cpu。选择模型、统计和 SVD 的执行设备。 |
-| `--compression_backend` | `GPU` | `GPU` 的 **compression** 统计和分解使用 float64，Poseidon 复用缓存放在设备上；`low-gpu` 的 compression 使用 float32，Poseidon 捕获的 attention/patch 参数和复用缓存放 CPU。两种模式都保留 teacher/student 模型在指定设备；不会把整个算法改成 CPU。它不改变模型权重 dtype、Input/Fisher 精度设置，也不改变 rank selection 的 float64 计算。 |
+| `--compression_backend` | `GPU` | `GPU` 的 **compression** 统计和分解使用 float64；`low-gpu` 的 compression 使用 float32。**两种模式的 Poseidon 捕获参数和复用缓存都默认放 CPU**，与 safesvd 的采集策略一致。teacher/student 模型仍在指定设备；不会把整个算法改成 CPU。此参数不改变模型权重 dtype、Input/Fisher 精度设置，也不改变 rank selection 的 float64 计算。 |
 
 显存排查时先降低 `batch_size`、`capture_batch_size`，使用 `compression_backend=low-gpu`。
 只有 Fisher 阶段 OOM 才需要先降低 fisher_batch_size。不要把减少 traj_num 当成减少单次前向 batch 的同义操作。
@@ -124,7 +124,7 @@ low-gpu 会改变 compression 的数值精度，并增加 CPU 内存与传输开
 | `eps_whiten`、`eps_whiten_mode` | `1e-6`、`absolute` | 对应 whitening_eps、whitening_eps_mode。 |
 | `input_accumulation_dtype` | `None` | 仅 Input 统计累积 dtype：MPP/VICON 默认 float64，Poseidon 默认 float32；输入 Gram 乘积仍默认 float32。 |
 | `compute_dtype` | `torch.float64` | 仅 compression 的统计/矩阵/SVD dtype，可设 float32。不修改 rank selection 的 float64。CLI low-gpu 设为 float32。 |
-| `offload_cache` | `False` | Poseidon capture 参数与复用缓存放 CPU；模型仍在 device。CLI low-gpu 设为 True。 |
+| `offload_cache` | `True` | Poseidon capture 参数与复用缓存默认放 CPU；模型仍在 device。CLI 的 GPU 和 low-gpu 都为 True，缓存位置不再与统计精度绑定。Python API 可以显式 False 使用设备缓存，但显存会随校准样本数量累计。 |
 | `fisher_loss_fn` | `None` | 自定义可微标量损失回调 `(model, CalibrationBatch) -> Tensor`，覆盖默认 Fisher 损失路由。无 CLI 选项。 |
 | `profile_cache`、`fisher_cache`、`rank_cache` | 均 `None` | 显式缓存文件；API 默认不读写缓存，CLI 自动生成路径。 |
 | `save_path` | `None` | API 默认只返回模型、不保存；CLI 默认生成输出目录。 |
@@ -158,3 +158,21 @@ python -m safe_svd.main --model poseidon \
 ```
 
 这些是示例值，必须替换为原运行的路径与采样/压缩参数。此方式跳过前三阶段，但从第一层重新开始 compression；没有自动逐层恢复已失败的压缩。
+
+## 10. 与 safesvd/ 的 Poseidon 采集配置对比
+
+以下以本仓库当前实际代码为准。`safesvd/adapters/poseidon_runtime.py` 的常量为 Fisher batch=8、capture chunk=64；部分旧注释仍写 512，那不是当前常量值。
+
+| 项目 | safesvd/ | safe_svd/ 修正后 |
+| --- | --- | --- |
+| Fisher batch | 固定 8 | CLI 默认 16，可用 fisher_batch_size=8 对齐；缓存命中时不执行 Fisher。 |
+| Input profiling / rollout batch | Trainer 固定 256 | batch_size，默认 256；fisher_batch_size、capture_batch_size 不改变 Step 1 的 batch。 |
+| Compression capture slice | 当前常量 64 | capture_batch_size，默认 64，可设 8。只限制每批样本数，不减少总校准数据。 |
+| MLP、QKV、patch 复用缓存 | 始终 CPU | 默认 CPU，两种 compression_backend 都一致；修正前 GPU 模式会把整份校准缓存累计在 GPU。 |
+| 重算出的 MLP/attention/patch 特征 | 送回 CPU 后统计 | 默认也送回 CPU；先释放 teacher 重算的 GPU 输出，再执行 student 重算。 |
+| GPU 统计与 SVD | float64 | GPU 模式 float64；low-gpu float32。矩阵大小由特征维数决定，不随 batch 缩小。 |
+| 压缩阶段边界 | 模型临时搬 CPU、gc、empty_cache | Step 4 前同样清理；这是释放未使用存储，不能清除仍被缓存引用的活跃张量。 |
+| 层间矩阵存储 | 随使用结束释放 | 及时消费协方差，提前删除 weight/left/right 工作矩阵，层间释放未使用 CUDA 缓存。 |
+
+CUDA 显存主要由两份模型、当前前向/特征、复用缓存、协方差与分解工作空间组成。仅缩小 capture_batch_size，只能减少当前批特征；若复用缓存仍在 GPU，遍历完整校准集时总占用仍会不断增加。
+Step 4 中 OOM 时，调整 Fisher batch 没有效果；若日志写 Loaded Fisher cache，它连 Step 2 都没有重新运行。

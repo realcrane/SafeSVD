@@ -438,23 +438,26 @@ class PoseidonRouteTests(unittest.TestCase):
             pairs = list(collect_poseidon(ctx, "encoder.layers.0.blocks.0.attention.self.query"))
         self.assertTrue(pairs)
 
-    def test_low_gpu_offloads_inside_capture_before_student_rollout(self):
+    def test_default_and_low_gpu_offload_inside_capture_before_student_rollout(self):
         from safe_svd.compress import collect_poseidon
         from safe_svd.helper.collector.poseidon import attention_module_collector as attention
-        ctx = self.attention_context()
         original_capture = attention.capture_rollout
-        captures = []
-        def capture(*args, **kwargs):
-            self.assertEqual(kwargs["capture_device"], "cpu")
-            result = original_capture(*args, **kwargs)
-            self.assertTrue(all(value[0].device.type == "cpu" for value in result))
-            captures.append(result)
-            return result
-        name = "encoder.layers.0.blocks.0.attention.self.query"
-        with patch.object(attention, "capture_rollout", side_effect=capture):
-            pairs = list(collect_poseidon(ctx, name))
-        self.assertEqual(len(captures), 6)  # teacher+student for each of 3 slices.
-        self.assert_pairs(ctx, name, pairs)
+        for explicit_offload in (False, True):
+            ctx = self.attention_context()
+            if not explicit_offload:
+                ctx.options.pop("offload_cache")
+            captures = []
+            def capture(*args, **kwargs):
+                self.assertEqual(kwargs["capture_device"], "cpu")
+                result = original_capture(*args, **kwargs)
+                self.assertTrue(all(value[0].device.type == "cpu" for value in result))
+                captures.append(result)
+                return result
+            name = "encoder.layers.0.blocks.0.attention.self.query"
+            with self.subTest(explicit_offload=explicit_offload), patch.object(attention, "capture_rollout", side_effect=capture):
+                pairs = list(collect_poseidon(ctx, name))
+            self.assertEqual(len(captures), 6)  # teacher+student for each of 3 slices.
+            self.assert_pairs(ctx, name, pairs)
 
     def test_attention_uncached_and_skipped_value_use_source_fallback(self):
         from safe_svd.compress import collect_poseidon

@@ -155,12 +155,16 @@ def compress(
                         device=target, dtype=compute_dtype,
                         aggregation=aggregation, trace_balance=trace_balance,
                     )
+                    right_metric = hphp.mul_(alpha).add_(hh, alpha=1 - alpha)
+                    del hphp
                     right, right_inverse_transpose = right_whitener(
-                        (1 - alpha) * hh + alpha * hphp,
+                        right_metric,
                         method=whitening, eps=eps, eps_mode=eps_mode, sample_count=count,
                     )
-                    cross = ((1 - alpha) * hh + alpha * hhp) @ right_inverse_transpose
-                    del hh, hhp, hphp
+                    del right_metric, right
+                    cross = hh.mul_(1 - alpha).add_(hhp, alpha=alpha)
+                    del hh, hhp
+                    cross = cross @ right_inverse_transpose
                 # Keep decomposition workspaces out of the capture forward.
                 # Do not allocate a large identity when a Fisher factor exists.
                 weight = original.weight.detach().to(dtype=compute_dtype)
@@ -173,14 +177,19 @@ def compress(
                 matrix = (left @ weight) @ (right if mode == "clean" else cross)
                 if mode != "clean":
                     del cross
+                else:
+                    del right
+                del weight, left
                 replace_linear(student, name, original, matrix, rank, left_inverse, right_inverse_transpose)
                 context.cache.pop(name, None)
-                del weight, left, left_inverse, right, right_inverse_transpose, matrix
+                del left_inverse, right_inverse_transpose, matrix
             done.add(name)
             since_checkpoint += 1
             if checkpoint_fn is not None and since_checkpoint >= checkpoint_every:
                 checkpoint_fn(student, set(done))
                 since_checkpoint = 0
+            if target.type == "cuda":
+                torch.cuda.empty_cache()
         if checkpoint_fn is not None and since_checkpoint:
             checkpoint_fn(student, set(done))
         return student.cpu()

@@ -129,7 +129,7 @@ class UnifiedCLITests(unittest.TestCase):
             trainer = SimpleNamespace(model=SimpleNamespace(config=SimpleNamespace(name_or_path="weights")))
             with patch.dict(sys.modules, modules):
                 run_rollout(trainer, "data")
-            self.assertEqual(calls, [((trainer, "data"), {"model_path": "weights"})])
+            self.assertEqual(calls, [((trainer, "data"), {})])
 
     def test_mpp_loader_and_full_cli(self):
         _model, dataset, options, _args = make_case("mpp")
@@ -228,13 +228,16 @@ class UnifiedCLITests(unittest.TestCase):
             modules["scOT.problems.base"].get_dataset = get_dataset
             modules["scOT.inference"].get_trainer = get_trainer
             modules["scOT.inference"].rollout = options["rollout_fn"]
-            with patch.dict(sys.modules, modules), patch.object(sys, "path", sys.path[:]), patch.object(self.entry, "PROJECT_ROOT", root):
+            with patch.dict(sys.modules, modules), patch.object(sys, "path", sys.path[:]), patch.object(self.entry, "PROJECT_ROOT", root), \
+                 patch.object(self.entry, "compress", wraps=self.entry.compress) as compressor:
                 code = self.entry.cli_main(["--model", "poseidon", "--model_path", str(root / "weights"),
                     "--data_path", str(root / "data"), "--dataset", "wave", "--traj_num", "2", "--calibration_seed", "0",
                     "--final_time", "3", "--rank_ratio", "0.5", "--whitening_mode", "new", "--DEV", "cpu",
                     "--fisher_batch_size", "2", "--gpu_profile", "--cache_dir", str(root / "cache"),
                     "--rank_root", str(root / "ranks"), "--save_path", str(root / "out")])
             self.assertEqual(code, 0)
+            self.assertTrue(compressor.call_args.kwargs["route_options"]["offload_cache"])
+            self.assertEqual(compressor.call_args.kwargs["compute_dtype"], torch.float64)
             self.assertEqual(calls["dataset"]["num_trajectories"], -1)
             self.assertEqual(calls["dataset"]["max_num_time_steps"], 3)
             selected = calls["trainer"]["dataset"]

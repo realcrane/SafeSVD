@@ -126,7 +126,7 @@ CaptureFunction = Callable[[CaptureContext, str], CapturedPairs]
 
 
 def cache_pair(context: CaptureContext, teacher_value, student_value):
-    device = "cpu" if context.options.get("offload_cache", context.options.get("low_gpu", False)) else context.device
+    device = "cpu" if context.options.get("offload_cache", context.options.get("low_gpu", True)) else context.device
     return tree_to(teacher_value, device), tree_to(student_value, device)
 
 

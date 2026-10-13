@@ -9,6 +9,7 @@ All CLI and Python API parameters are documented in safe_svd/PARAMETERS.md.
 from __future__ import annotations
 
 import argparse
+import gc
 import inspect
 import json
 import sys
@@ -63,7 +64,7 @@ def main(
     eps_whiten_mode="absolute",
     input_accumulation_dtype=None,
     compute_dtype=torch.float64,
-    offload_cache=False,
+    offload_cache=True,
     fisher_loss_fn=None,
     profile_cache=None,
     fisher_cache=None,
@@ -287,6 +288,12 @@ def main(
     # ===================================================================
     if verbose:
         print("==== Step 4: Compression ====", flush=True)
+    if dev.type == "cuda":
+        # Match the existing runtime's fresh-stage boundary before copying
+        # the teacher: clear unused buffers without changing model precision.
+        model.cpu()
+        gc.collect()
+        torch.cuda.empty_cache()
     with perf.stage("compression"):
         compressed_model = compress(
             model,
@@ -397,7 +404,7 @@ def parse_args(argv=None):
     parser.add_argument("--final_time", type=int, default=20, help="Poseidon max_num_time_steps for non-elliptic data (default: 20)")
     parser.add_argument("--order_control", type=int, default=2, help="Poseidon maximum spatial derivative order; 0 still includes physical value error (default: 2)")
     parser.add_argument("--compression_backend", choices=("GPU", "low-gpu"), default="GPU",
-                        help="GPU=float64 statistics/SVD; low-gpu=float32 and CPU capture cache (default: GPU)")
+                        help="Compression precision: GPU=float64; low-gpu=float32. Poseidon caches are CPU in both modes")
     parser.add_argument("--gpu_profile", action="store_true", help="Write per-stage timing/memory to save_path/gpu_profile.csv")
     args = parser.parse_args(argv)
 
@@ -664,6 +671,7 @@ def cli_main(argv=None):
     print(f"Official model package: {args.runtime_root}")
     if args.model_type == "poseidon":
         print(f"Dataset: {args.dataset}; traj_num: {args.traj_num}; final_time: {args.final_time}; calibration_seed: {args.calibration_seed if args.calibration_seed is not None else 'default'}")
+        print(f"Batches: rollout={args.batch_size or 256}; Fisher={args.fisher_batch_size}; capture={args.capture_batch_size}; cache=cpu; compression_dtype={'float32' if args.compression_backend == 'low-gpu' else 'float64'}")
     else:
         print(f"Calibration_num: {args.calibration_num}; calibration_seed: {args.calibration_seed}; trace: {args.use_trace_balance}")
     print(f"Whitening: {args.whitening_mode}/{args.eps_whiten_mode}/{args.eps_whiten}; Fisher: {args.use_fisher}/{args.gradient_loss}; stage: {args.pipeline_stage}")
@@ -704,7 +712,7 @@ def cli_main(argv=None):
         eps_whiten=args.eps_whiten,
         eps_whiten_mode=args.eps_whiten_mode,
         compute_dtype=torch.float32 if args.compression_backend == "low-gpu" else torch.float64,
-        offload_cache=args.compression_backend == "low-gpu",
+        offload_cache=True,
         profile_cache=args.profile_cache,
         fisher_cache=args.fisher_cache,
         rank_cache=args.rank_cache,
