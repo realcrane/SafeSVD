@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+from tqdm.auto import tqdm
 
 from .collector import CovarianceAccumulator, collection_state
 from .profiling_routes import (
-    validate_route, iter_calibration_batches, fisher_context, fisher_options,
+    validate_route, iter_calibration_batches, calibration_batch_count, fisher_context, fisher_options,
     FISHER_LOSS_ROUTES, VICON_SOBOLEV_ORDERS,
 )
 from ..whitener import fisher_whitener
@@ -16,7 +17,7 @@ from ..whitener import fisher_whitener
 def collect_fisher(
     model, calibration_data, *, model_type, device="cuda", route_options=None,
     aggregation=None, trace_balance=None, trace_groups=None, care_identity=False,
-    accumulation_dtype=None, loss_fn=None, return_statistics=False,
+    accumulation_dtype=None, loss_fn=None, return_statistics=False, progress=True,
 ):
     """Collect G.T @ G from each Linear output gradient, then return (L, L^-1).
 
@@ -28,6 +29,7 @@ def collect_fisher(
     return_statistics returns (left_metrics, counts, mean_covariances).
     Hooks, inplace flags, trainer state and original training modes are
     restored on success/failure. Gradients are cleared; model stays on device.
+    progress shows completed forward/backward batches, category and loss.
     """
     options = fisher_options(calibration_data, model_type, route_options or {})
     validate_route(model_type, options)
@@ -55,18 +57,25 @@ def collect_fisher(
                     if grad_output and grad_output[0] is not None:
                         stats.add(name, category, grad_output[0], features)
                 handles.append(layer.register_full_backward_hook(hook))
-            for tagged in iter_calibration_batches(calibration_data, model_type, target, options):
-                category = tagged.category
-                model.zero_grad(set_to_none=True)
-                value = (loss_fn(model, tagged) if loss_fn is not None else
-                         FISHER_LOSS_ROUTES[model_type](model, tagged, target, options))
-                if not torch.is_tensor(value) or not value.requires_grad:
-                    raise ValueError("Fisher loss must be a differentiable Tensor")
-                if value.ndim:
-                    value = value.mean()
-                if not torch.isfinite(value):
-                    raise ValueError("Non-finite Fisher loss")
-                value.backward()
+            batches = iter_calibration_batches(calibration_data, model_type, target, options)
+            total = calibration_batch_count(calibration_data, model_type, options) if progress else None
+            with tqdm(batches, total=total, desc=f"Fisher ({model_type})", unit="batch",
+                      dynamic_ncols=True, disable=not progress) as bar:
+                for tagged in bar:
+                    category = tagged.category
+                    model.zero_grad(set_to_none=True)
+                    value = (loss_fn(model, tagged) if loss_fn is not None else
+                             FISHER_LOSS_ROUTES[model_type](model, tagged, target, options))
+                    if not torch.is_tensor(value) or not value.requires_grad:
+                        raise ValueError("Fisher loss must be a differentiable Tensor")
+                    if value.ndim:
+                        value = value.mean()
+                    if not torch.isfinite(value):
+                        raise ValueError("Non-finite Fisher loss")
+                    value.backward()
+                    if progress:
+                        bar.set_postfix(dataset=category, loss=f"{value.detach().item():.4g}")
+                    del value, tagged
         finally:
             for handle in handles:
                 handle.remove()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from collections.abc import Mapping
+import math
 
 import torch
 import torch.nn.functional as F
@@ -48,6 +49,31 @@ def iter_calibration_batches(data, model_type, device, options):
             if limit is not None and index >= limit:
                 break
             yield CalibrationBatch(options.get("dataset_name", "poseidon"), batch)
+
+
+def calibration_batch_count(data, model_type, options):
+    """Count sized calibration batches without reading any examples.
+
+    Stream datasets have no exact length; tqdm then displays the batch count
+    and elapsed time without inventing a total.
+    """
+    try:
+        if model_type == "mpp":
+            size = options["params"].batch_size
+            limit = options.get("batches_per_dset", 16)
+            counts = [len(subset) // size for group in data.sub_dsets
+                      for subset in group.get_per_file_dsets()]
+        elif model_type == "vicon":
+            limit = options.get("max_calib_batches")
+            counts = [len(loader) for loader in data.values()]
+        else:
+            limit = options.get("max_calib_batches")
+            loader = data if isinstance(data, DataLoader) else options.get("fisher_loader")
+            counts = [len(loader) if loader is not None else
+                      math.ceil(len(data) / options.get("fisher_batch_size", 16))]
+    except (TypeError, NotImplementedError):
+        return None
+    return sum(min(count, math.ceil(limit)) if limit is not None else count for count in counts)
 
 
 def run_input_profile(model, data, model_type, device, options, set_category):

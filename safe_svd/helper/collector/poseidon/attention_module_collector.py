@@ -67,5 +67,7 @@ def attention_context_from_cached_inputs(
 
 
 @torch.no_grad()
-def attention_self_input_catch(trainer, model, self_name, calib_dataset, device, *, rollout_fn=None):
-    return capture_rollout(trainer, model, self_name, calib_dataset, device, rollout_fn=rollout_fn)
+def attention_self_input_catch(trainer, model, self_name, calib_dataset, device, *, rollout_fn=None,
+                               capture_device=None):
+    return capture_rollout(trainer, model, self_name, calib_dataset, device,
+                           rollout_fn=rollout_fn, capture_device=capture_device)

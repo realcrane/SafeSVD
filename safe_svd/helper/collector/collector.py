@@ -222,6 +222,9 @@ def collect_statistics(
         hhp.addmm_(h.T, hp)
         hphp.addmm_(hp.T, hp)
         buckets[category] = (hh, hhp, hphp, count + h.shape[0])
+        # Release the previous batch before requesting the next capture;
+        # converted float64 activations otherwise overlap the next forward.
+        del h, hp, teacher_input, student_input, values
 
     if not buckets:
         raise ValueError("No paired calibration inputs were captured")

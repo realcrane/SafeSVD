@@ -26,6 +26,8 @@ def collect_poseidon(context: CaptureContext, layer_name: str) -> CapturedPairs:
     trainer = context.options["trainer"]
     rollout_fn = context.options.get("rollout_fn")
     batch_size = context.options.get("capture_batch_size", 64)
+    capture_device = ("cpu" if context.options.get("offload_cache", context.options.get("low_gpu", False))
+                      else context.device)
     if not isinstance(batch_size, int) or batch_size < 1:
         raise ValueError("capture_batch_size must be a positive integer")
     features = context.teacher.get_submodule(layer_name).in_features
@@ -45,6 +47,7 @@ def collect_poseidon(context: CaptureContext, layer_name: str) -> CapturedPairs:
             h = transform(context.teacher, kind, block_name, first_name, tree_to(h, context.device))
             hp = transform(context.student, kind, block_name, first_name, tree_to(hp, context.device))
             yield category, feature_rows(h, features), feature_rows(hp, features)
+            del h, hp
         return
     if attention is not None and entry is not None:
         if role in {"key", "value"}:
@@ -59,6 +62,7 @@ def collect_poseidon(context: CaptureContext, layer_name: str) -> CapturedPairs:
                 h = transform(context.teacher, self_name, [args], context.device)[0]
                 hp = transform(context.student, self_name, [args_p], context.device)[0]
                 yield category, feature_rows(h, features), feature_rows(hp, features)
+                del h, hp
             return
     if patch is not None and patch[0] == "mixup" and entry is not None:
         transform = patch_unmerging_mixup_inputs_from_args
@@ -66,6 +70,7 @@ def collect_poseidon(context: CaptureContext, layer_name: str) -> CapturedPairs:
             h = transform(context.teacher, patch[1], [args], context.device)[0]
             hp = transform(context.student, patch[1], [args_p], context.device)[0]
             yield category, feature_rows(h, features), feature_rows(hp, features)
+            del h, hp
         return
 
     cached = []
@@ -73,18 +78,24 @@ def collect_poseidon(context: CaptureContext, layer_name: str) -> CapturedPairs:
         subset = Subset(context.calibration_data, list(range(start, min(start + batch_size, len(context.calibration_data)))))
         if attention is not None and role == "query":
             helper = attention_self_input_catch
-            teacher_args = helper(trainer, context.teacher, self_name, subset, context.device, rollout_fn=rollout_fn)
-            student_args = helper(trainer, context.student, self_name, subset, context.device, rollout_fn=rollout_fn)
+            teacher_args = helper(trainer, context.teacher, self_name, subset, context.device,
+                                  rollout_fn=rollout_fn, capture_device=capture_device)
+            student_args = helper(trainer, context.student, self_name, subset, context.device,
+                                  rollout_fn=rollout_fn, capture_device=capture_device)
             for args, args_p in paired_values(teacher_args, student_args):
                 cached.append(cache_pair(context, args, args_p))
                 yield category, feature_rows(args[0], features), feature_rows(args_p[0], features)
+            del teacher_args, student_args, args, args_p
         elif patch is not None and patch[0] == "upsample":
             helper = patch_unmerging_args_catch
-            teacher_args = helper(trainer, context.teacher, patch[1], subset, context.device, rollout_fn=rollout_fn)
-            student_args = helper(trainer, context.student, patch[1], subset, context.device, rollout_fn=rollout_fn)
+            teacher_args = helper(trainer, context.teacher, patch[1], subset, context.device,
+                                  rollout_fn=rollout_fn, capture_device=capture_device)
+            student_args = helper(trainer, context.student, patch[1], subset, context.device,
+                                  rollout_fn=rollout_fn, capture_device=capture_device)
             for args, args_p in paired_values(teacher_args, student_args):
                 cached.append(cache_pair(context, args, args_p))
                 yield category, feature_rows(args[0], features), feature_rows(args_p[0], features)
+            del teacher_args, student_args, args, args_p
         else:
             # Includes the source's shortcut for uncached second MLP members.
             helper = mlp_aware_input_catch
@@ -94,6 +105,7 @@ def collect_poseidon(context: CaptureContext, layer_name: str) -> CapturedPairs:
             if mlp is not None and layer_name == mlp[2]:
                 cached.append(cache_pair(context, h, hp))
             yield category, h, hp
+            del h, hp
     if mlp is not None and layer_name == mlp[2]:
         context.cache[mlp[3]] = {"pairs": cached}
     elif attention is not None and role == "query":

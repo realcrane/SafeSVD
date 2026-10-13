@@ -2,7 +2,7 @@
 
 The caller supplies an already-loaded model whose target projections are
 nn.Linear (convert VICON attention before calling). Ranks and Fisher factors
-are prepared upstream. This module is not wired into the existing CLI.
+are prepared upstream by safe_svd.main.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from typing import Any
 
 import torch
 from torch import Tensor, nn
+from tqdm.auto import tqdm
 
 from safe_svd.helper.collector.collector import CaptureContext, CaptureFunction, collect_statistics
 from safe_svd.helper.collector.mpp_collector import collect_mpp
@@ -73,6 +74,7 @@ def compress(
     checkpoint_every: int = 10,
     initial_student: nn.Module | None = None,
     completed_layers: Iterable[str] = (),
+    progress: bool = True,
 ) -> nn.Module:
     """Compress an already-loaded model; return the student on CPU.
 
@@ -81,6 +83,7 @@ def compress(
     combined captures current teacher/student inputs; clean uses input_metrics.
     Supply initial_student/completed_layers for resume. A checkpoint callback
     receives the live student and must restore its device if it moves it.
+    progress shows all target Linear layers, including retained layers.
     """
     routes = {"mpp": collect_mpp, "vicon": collect_vicon, "poseidon": collect_poseidon}
     if model_type not in routes:
@@ -120,8 +123,12 @@ def compress(
     context = CaptureContext(teacher, student, calibration_data, target, route_options or {}, ranks=ranks)
     collector = capture_fn if capture_fn is not None else routes[model_type]
     since_checkpoint = 0
+    bar = tqdm(layers, desc=f"Compression ({model_type})", unit="layer",
+               dynamic_ncols=True, disable=not progress)
     try:
-        for name, original in layers:
+        for name, original in bar:
+            if progress:
+                bar.set_postfix(layer=name, rank=ranks.get(name) if ranks.get(name) is not None else "keep")
             if name in done:
                 context.cache.pop(name, None)
                 continue
@@ -138,16 +145,10 @@ def compress(
                 context.cache.pop(name, None)
             else:
                 rank = int(rank)
-                weight = original.weight.detach().to(dtype=compute_dtype)
-                identity = torch.eye(original.out_features, device=target, dtype=compute_dtype)
-                left, left_inverse = (left_metrics or {}).get(name, (identity, identity))
-                left = left.to(device=target, dtype=compute_dtype)
-                left_inverse = left_inverse.to(device=target, dtype=compute_dtype)
                 if mode == "clean":
                     right, right_inverse_transpose = input_metrics[name]
                     right = right.to(device=target, dtype=compute_dtype)
                     right_inverse_transpose = right_inverse_transpose.to(device=target, dtype=compute_dtype)
-                    matrix = (left @ weight) @ right
                 else:
                     hh, hhp, hphp, count = collect_statistics(
                         collector(context, name), original.in_features,
@@ -159,11 +160,22 @@ def compress(
                         method=whitening, eps=eps, eps_mode=eps_mode, sample_count=count,
                     )
                     cross = ((1 - alpha) * hh + alpha * hhp) @ right_inverse_transpose
-                    matrix = (left @ weight) @ cross
-                    del hh, hhp, hphp, cross
+                    del hh, hhp, hphp
+                # Keep decomposition workspaces out of the capture forward.
+                # Do not allocate a large identity when a Fisher factor exists.
+                weight = original.weight.detach().to(dtype=compute_dtype)
+                metric = (left_metrics or {}).get(name)
+                if metric is None:
+                    left = torch.eye(original.out_features, device=target, dtype=compute_dtype)
+                    left_inverse = left
+                else:
+                    left, left_inverse = (value.to(device=target, dtype=compute_dtype) for value in metric)
+                matrix = (left @ weight) @ (right if mode == "clean" else cross)
+                if mode != "clean":
+                    del cross
                 replace_linear(student, name, original, matrix, rank, left_inverse, right_inverse_transpose)
                 context.cache.pop(name, None)
-                del weight, identity, left, left_inverse, right, right_inverse_transpose, matrix
+                del weight, left, left_inverse, right, right_inverse_transpose, matrix
             done.add(name)
             since_checkpoint += 1
             if checkpoint_fn is not None and since_checkpoint >= checkpoint_every:
@@ -173,5 +185,6 @@ def compress(
             checkpoint_fn(student, set(done))
         return student.cpu()
     finally:
+        bar.close()
         context.cache.clear()
         context.runtime.clear()

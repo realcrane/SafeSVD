@@ -3,6 +3,7 @@
 Run directly with --model mpp/vicon/poseidon to load model and calibration
 data, then run input profiling, Fisher collection, rank selection and compression.
 Cache paths must belong to the same checkpoint and calibration configuration.
+All CLI and Python API parameters are documented in safe_svd/PARAMETERS.md.
 """
 
 from __future__ import annotations
@@ -246,6 +247,7 @@ def main(
                     aggregation=aggregation,
                     trace_balance=trace_balance,
                     loss_fn=fisher_loss_fn,
+                    progress=verbose,
                 )
                 if fisher_cache is not None:
                     fisher_cache.parent.mkdir(parents=True, exist_ok=True)
@@ -303,6 +305,7 @@ def main(
             aggregation=aggregation,
             trace_balance=trace_balance,
             compute_dtype=compute_dtype,
+            progress=verbose,
         )
 
     # ===================================================================
@@ -324,60 +327,78 @@ run_safe_svd = main
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="Unified SAFE-SVD: load -> input -> Fisher -> rank -> compress")
-    parser.add_argument("--model", "--model_type", dest="model_type", choices=("mpp", "vicon", "poseidon"), required=True)
-    parser.add_argument("--DEV", "--device", dest="DEV", default="cuda")
-    parser.add_argument("--ckpt_path", "--model_path", dest="ckpt_path", type=Path)
-    parser.add_argument("--data_root", "--data_path", dest="data_root", type=Path)
-    parser.add_argument("--rank_ratio", type=float)
-    parser.add_argument("--rank_selector", choices=("legacy", "safe"))
-    parser.add_argument("--alpha", type=float, default=0.7)
-    parser.add_argument("--use_fisher", choices=("y", "n"), default="y")
-    parser.add_argument("--fisher_loss", "--gradient_loss", dest="gradient_loss", choices=("l1", "mse", "smooth_l1"), default="l1")
-    parser.add_argument("--balance_ratio", type=float, default=10.0)
-    parser.add_argument("--decay_alpha", type=float, default=1.0)
-    parser.add_argument("--use_trace_balance", "--use_trace_align", dest="use_trace_balance", choices=("y", "n"))
-    parser.add_argument("--compress_mode", choices=("comb", "clean_input"), default="comb")
-    parser.add_argument("--whitening_mode", choices=("origin", "new"))
-    parser.add_argument("--whitening_eps", "--eps_whiten", dest="eps_whiten", type=float, default=1e-6)
+    parser = argparse.ArgumentParser(
+        description="Unified SAFE-SVD: load -> input -> Fisher -> rank -> compress",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Model defaults: MPP ratio=0.4, samples=16, seed=42, selector=legacy;\n"
+               "VICON ratio=0.8, samples=2048, seed=2026, selector=legacy;\n"
+               "Poseidon ratio=0.2, trajectories=64, seed=default, selector=safe.\n"
+               "Full parameter definitions and memory guidance: safe_svd/PARAMETERS.md",
+    )
+    parser.add_argument("--model", "--model_type", dest="model_type", choices=("mpp", "vicon", "poseidon"), required=True,
+                        help="Select the model/data loading and collection route")
+    parser.add_argument("--DEV", "--device", dest="DEV", default="cuda", help="Torch device (default: cuda)")
+    parser.add_argument("--ckpt_path", "--model_path", dest="ckpt_path", type=Path,
+                        help="Checkpoint file for MPP/VICON, config+weights directory for Poseidon")
+    parser.add_argument("--data_root", "--data_path", dest="data_root", type=Path, help="Dataset root directory")
+    parser.add_argument("--rank_ratio", type=float, help="Retained Linear weight budget fraction in (0,1], not per-layer rank")
+    parser.add_argument("--rank_selector", choices=("legacy", "safe"), help="Original greedy or strict-budget greedy allocation")
+    parser.add_argument("--alpha", type=float, default=0.7, help="Student-input correction weight in comb mode, [0,1] (default: 0.7)")
+    parser.add_argument("--use_fisher", choices=("y", "n"), default="y", help="Use Fisher left metrics in rank/compression (default: y)")
+    parser.add_argument("--fisher_loss", "--gradient_loss", dest="gradient_loss", choices=("l1", "mse", "smooth_l1"), default="l1",
+                        help="Physical/Sobolev error function; base model loss is unchanged (default: l1)")
+    parser.add_argument("--balance_ratio", type=float, default=10.0, help="Physical loss strength relative to base loss (default: 10)")
+    parser.add_argument("--decay_alpha", type=float, default=1.0, help="MPP/Poseidon order-k loss multiplier decay_alpha**(k-1) (default: 1)")
+    parser.add_argument("--use_trace_balance", "--use_trace_align", dest="use_trace_balance", choices=("y", "n"),
+                        help="Balance covariance traces across categories (MPP/VICON: y; Poseidon: n)")
+    parser.add_argument("--compress_mode", choices=("comb", "clean_input"), default="comb",
+                        help="Sequential teacher/student capture or original-input-only SVD (default: comb)")
+    parser.add_argument("--whitening_mode", choices=("origin", "new"),
+                        help="Cholesky-relative-jitter or spectral whitening (Poseidon: origin; others: new)")
+    parser.add_argument("--whitening_eps", "--eps_whiten", dest="eps_whiten", type=float, default=1e-6,
+                        help="Positive regularizer for new spectral whitening (default: 1e-6)")
     parser.add_argument("--whitening_eps_mode", "--eps_whiten_mode", dest="eps_whiten_mode",
-                        choices=("absolute", "relative", "sum_equivalent"), default="absolute")
-    parser.add_argument("--calibration_seed", default=None, metavar="default|SEED")
-    parser.add_argument("--batch_size", type=int)
-    parser.add_argument("--fisher_batch_size", type=int, default=16)
-    parser.add_argument("--capture_batch_size", type=int, default=64)
-    parser.add_argument("--pipeline_stage", choices=("all", "rank_selection", "compression"), default="all")
-    parser.add_argument("--profile_cache", type=Path)
-    parser.add_argument("--fisher_cache", type=Path)
-    parser.add_argument("--rank_cache", "--rank_path", dest="rank_cache", type=Path)
-    parser.add_argument("--cache_dir", type=Path)
-    parser.add_argument("--rank_root", type=Path)
-    parser.add_argument("--save_path", type=Path)
-    parser.add_argument("--overwrite_cache", action="store_true")
+                        choices=("absolute", "relative", "sum_equivalent"), default="absolute",
+                        help="Use eps, eps*mean(diagonal), or eps/feature-row-count (default: absolute)")
+    parser.add_argument("--calibration_seed", default=None, metavar="default|SEED",
+                        help="Sampling seed; Poseidon default selects fixed prefix, integer selects random trajectories")
+    parser.add_argument("--batch_size", type=int, help="MPP YAML batch override; VICON default 128; Poseidon inference default 256")
+    parser.add_argument("--fisher_batch_size", type=int, default=16, help="Poseidon backward batch size (default: 16)")
+    parser.add_argument("--capture_batch_size", type=int, default=64, help="Poseidon compression capture slice size in examples, not trajectories (default: 64)")
+    parser.add_argument("--pipeline_stage", choices=("all", "rank_selection", "compression"), default="all",
+                        help="All stages, stop after ranks, or compress with existing caches (default: all)")
+    parser.add_argument("--profile_cache", type=Path, help="Input whitening factors and sample-count cache (.pt)")
+    parser.add_argument("--fisher_cache", type=Path, help="Fisher left-factor cache (.pt)")
+    parser.add_argument("--rank_cache", "--rank_path", dest="rank_cache", type=Path, help="Rank allocation cache (.json)")
+    parser.add_argument("--cache_dir", type=Path, help="Root for generated input/Fisher caches")
+    parser.add_argument("--rank_root", type=Path, help="Root for generated rank caches")
+    parser.add_argument("--save_path", type=Path, help="Output directory for compressed model and rank_dict.json")
+    parser.add_argument("--overwrite_cache", action="store_true", help="Recompute stage caches and allow replacing final output")
     parser.add_argument("--dry_run", action="store_true", help="Print paths/configuration without importing model runtimes or loading assets")
 
     # MPP arguments, retaining the names in MySVD/mysvd.py.
-    parser.add_argument("--yaml_config", type=Path)
-    parser.add_argument("--config", default="basic_config")
-    parser.add_argument("--calibration_num", type=int)
+    parser.add_argument("--yaml_config", type=Path, help="MPP model/data YAML file")
+    parser.add_argument("--config", default="basic_config", help="MPP YAML section (default: basic_config)")
+    parser.add_argument("--calibration_num", type=int, help="Samples per MPP file or VICON category (MPP: 16; VICON: 2048)")
 
     # VICON arguments; compose its original Hydra configuration explicitly.
-    parser.add_argument("--config_dir", type=Path)
-    parser.add_argument("--config_name", default="default")
-    parser.add_argument("--config_override", action="append", default=[], metavar="KEY=VALUE")
-    parser.add_argument("--random_calibration", choices=("y", "n"), default="n")
-    parser.add_argument("--rank_type", default="MySVD_Rank", choices=("MySVD_Rank",))
-    parser.add_argument("--dataset_workers", type=int)
+    parser.add_argument("--config_dir", type=Path, help="VICON Hydra configuration directory")
+    parser.add_argument("--config_name", default="default", help="VICON Hydra config name (default: default)")
+    parser.add_argument("--config_override", action="append", default=[], metavar="KEY=VALUE", help="Repeatable VICON Hydra override")
+    parser.add_argument("--random_calibration", choices=("y", "n"), default="n", help="VICON seeded random calibration selection (default: n)")
+    parser.add_argument("--rank_type", default="MySVD_Rank", choices=("MySVD_Rank",), help="VICON cache label; algorithm is chosen by rank_selector")
+    parser.add_argument("--dataset_workers", type=int, help="VICON calibration DataLoader workers (default: cfg.dataset_workers)")
 
     # Poseidon arguments, retaining SAFE_SVD/safe_svd.py's trajectory semantics.
-    parser.add_argument("--model_name", default="Poseidon-L")
-    parser.add_argument("--dataset", default="fluids.incompressible.PiecewiseConstants")
-    parser.add_argument("--traj_num", type=int, default=64)
-    parser.add_argument("--use_phyloss", default="no_phyloss")
-    parser.add_argument("--final_time", type=int, default=20)
-    parser.add_argument("--order_control", type=int, default=2)
-    parser.add_argument("--compression_backend", choices=("GPU", "low-gpu"), default="GPU")
-    parser.add_argument("--gpu_profile", action="store_true")
+    parser.add_argument("--model_name", default="Poseidon-L", help="Poseidon cache label; architecture comes from checkpoint (default: Poseidon-L)")
+    parser.add_argument("--dataset", default="fluids.incompressible.PiecewiseConstants", help="Poseidon dataset registry name (default: fluids.incompressible.PiecewiseConstants)")
+    parser.add_argument("--traj_num", type=int, default=64, help="Poseidon complete calibration trajectories (default: 64)")
+    parser.add_argument("--use_phyloss", default="no_phyloss", help="Compatibility argument only; does not change checkpoint or Fisher loss")
+    parser.add_argument("--final_time", type=int, default=20, help="Poseidon max_num_time_steps for non-elliptic data (default: 20)")
+    parser.add_argument("--order_control", type=int, default=2, help="Poseidon maximum spatial derivative order; 0 still includes physical value error (default: 2)")
+    parser.add_argument("--compression_backend", choices=("GPU", "low-gpu"), default="GPU",
+                        help="GPU=float64 statistics/SVD; low-gpu=float32 and CPU capture cache (default: GPU)")
+    parser.add_argument("--gpu_profile", action="store_true", help="Write per-stage timing/memory to save_path/gpu_profile.csv")
     args = parser.parse_args(argv)
 
     # Model-specific defaults match the original model scripts.

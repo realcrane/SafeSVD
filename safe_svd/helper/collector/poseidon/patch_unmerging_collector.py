@@ -62,5 +62,7 @@ def patch_unmerging_mixup_inputs_from_args(
 
 
 @torch.no_grad()
-def patch_unmerging_args_catch(trainer, model, block_name, calib_dataset, device, *, rollout_fn=None):
-    return capture_rollout(trainer, model, block_name, calib_dataset, device, rollout_fn=rollout_fn)
+def patch_unmerging_args_catch(trainer, model, block_name, calib_dataset, device, *, rollout_fn=None,
+                              capture_device=None):
+    return capture_rollout(trainer, model, block_name, calib_dataset, device,
+                           rollout_fn=rollout_fn, capture_device=capture_device)

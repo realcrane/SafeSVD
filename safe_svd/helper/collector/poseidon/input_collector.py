@@ -147,17 +147,20 @@ def run_rollout(trainer, dataset, rollout_fn=None):
 
 
 @torch.no_grad()
-def capture_rollout(trainer, model, module_name, dataset, device, *, transform=None, rollout_fn=None):
+def capture_rollout(trainer, model, module_name, dataset, device, *, transform=None, rollout_fn=None,
+                    capture_device=None):
     """Shared pre-hook/rollout for ordinary inputs and cached block arguments.
 
     transform receives the full argument tuple. Hooks and trainer state are
     restored before returning, including when rollout or transformation fails.
+    capture_device can offload arguments inside the hook, before the next batch
+    or the student's forward, while the model itself stays on device.
     """
     old_model = trainer.model
     model.to(device).eval()
     captured = []
     def pre(_module, args):
-        value = transform(args) if transform is not None else tree_to(args, device)
+        value = transform(args) if transform is not None else tree_to(args, capture_device or device)
         captured.append(value)
         raise _StopForward
     handle = get_module_by_name(model, module_name).register_forward_pre_hook(pre)

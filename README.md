@@ -362,6 +362,8 @@ from another directory.
 
 Use `python -m safe_svd.main --help` to see all options and append `--dry_run`
 to inspect the resolved configuration without loading any model or data.
+See [all parameter definitions](safe_svd/PARAMETERS.md) for defaults, supported
+models, batch-size controls, cache reuse and Poseidon memory guidance.
 `python safe_svd/main.py ...` and the installed `safe-svd-unified ...` command
 use the same entry point. MPP/VICON default to `--rank_selector legacy` and
 Poseidon to `safe`; `--rank_selector safe` selects the shared strict-budget
