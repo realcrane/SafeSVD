@@ -322,6 +322,51 @@ We have totally n finetuned poseidon models, and one VICON and MPP foundation mo
 python downloads/model_download.py
 ```
 
+## Unified entry point: `safe_svd/main.py`
+
+This entry point loads the selected model and calibration data, then runs input
+collection, Fisher collection, rank selection, and compression in order. All
+compression and calibration helpers live in this repository. It uses official
+model checkouts under `mpp/multiple_physics_pretraining/`, `vicon/VICON/`
+(or the existing `VICON/`), and `poseidon/scOT/`, prepared as described above.
+It does not load another research repository or the `poseidon_main` fork.
+There is no `--source_root` option.
+
+From the SAFE-SVD repository root:
+
+```bash
+python -m safe_svd.main --model mpp \
+  --ckpt_path ./models/MPP/MPP_AViT_L \
+  --yaml_config ./data/official/configs/mpp_avit_L.yaml \
+  --data_root ./data/official/mpp --rank_ratio 0.4
+
+python -m safe_svd.main --model vicon \
+  --ckpt_path ./models/VICON/model.pth \
+  --data_root /path/to/vicon_data --rank_ratio 0.8
+
+python -m safe_svd.main --model poseidon \
+  --model_path ./models/poseidon/fluids.incompressible.PiecewiseConstants \
+  --data_path ./poseidon/camlab-ethz/down_streams \
+  --dataset fluids.incompressible.PiecewiseConstants --rank_ratio 0.2
+```
+
+VICON's `--data_root` should contain the dataset subdirectories named in its
+Hydra config; use repeated `--config_override datasets.types.NAME.folder=PATH`
+for a different layout. MPP's YAML lists its train/validation directories;
+relative entries are resolved under `--data_root` and absolute entries are
+used as written. Explicit command-line paths are relative to the invocation
+directory. Default checkpoint paths match `model_download/model_download.py`.
+Default input/Fisher caches, ranks, and compressed models are written under
+this repository's `artifacts/{cache,ranks,compressed}/`, even when invoked
+from another directory.
+
+Use `python -m safe_svd.main --help` to see all options and append `--dry_run`
+to inspect the resolved configuration without loading any model or data.
+`python safe_svd/main.py ...` and the installed `safe-svd-unified ...` command
+use the same entry point. MPP/VICON default to `--rank_selector legacy` and
+Poseidon to `safe`; `--rank_selector safe` selects the shared strict-budget
+allocator for any model.
+
 ## Poseidon compression
 
 Place the unmodified upstream Poseidon checkout at `poseidon/`, downstream data

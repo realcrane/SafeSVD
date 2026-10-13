@@ -1,7 +1,7 @@
 """Poseidon rollout capture, copied from SAFE_SVD/helper/input_collector.py.
 
 Only capture-related code is included. Model inference remains a model-runtime
-operation: pass rollout_fn, or use the installed poseidon_main/scOT runtime.
+operation: pass rollout_fn, or use the official scOT runtime.
 No original SAFE_SVD module is imported.
 """
 
@@ -40,7 +40,7 @@ def quiet_everything():
     loggers = [
         logging.getLogger(),
         logging.getLogger("transformers"),
-        logging.getLogger("poseidon_main"),
+        logging.getLogger("scOT"),
     ]
     old_levels = [logger.level for logger in loggers]
     for logger in loggers:
@@ -139,12 +139,7 @@ def swallow_stop_and_mute_metrics(trainer):
 def run_rollout(trainer, dataset, rollout_fn=None):
     """Invoke model inference; import it lazily only for the Poseidon route."""
     if rollout_fn is None:
-        try:
-            from poseidon_main.scOT.inference import rollout as rollout_fn
-        except ModuleNotFoundError as error:
-            if not error.name or not error.name.startswith("poseidon_main"):
-                raise
-            from scOT.inference import rollout as rollout_fn
+        from scOT.inference import rollout as rollout_fn
     return rollout_fn(
         trainer, dataset,
         model_path=getattr(getattr(trainer.model, "config", None), "name_or_path", ""),

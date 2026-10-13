@@ -15,6 +15,17 @@ RankSelector = Literal["legacy", "safe"]
 RANK_SELECTORS: tuple[RankSelector, ...] = ("legacy", "safe")
 
 
+def _energy_scale(name, energy_scales):
+    if energy_scales is None:
+        return 1
+    if name not in energy_scales:
+        raise KeyError(f"Missing input sample count for {name}")
+    count = energy_scales[name]
+    if isinstance(count, bool) or int(count) != count or count <= 0:
+        raise ValueError(f"Input sample count must be a positive integer for {name}")
+    return int(count)
+
+
 def _linear_layers(model: nn.Module) -> list[tuple[str, nn.Linear]]:
     return [(name, module) for name, module in model.named_modules() if isinstance(module, nn.Linear)]
 
@@ -26,6 +37,8 @@ def allocate_greedy_ranks(
     input_whiteners: Mapping[str, tuple[torch.Tensor, torch.Tensor]],
     rank_ratio: float,
     device: str | torch.device,
+    *,
+    energy_scales: Mapping[str, int] | None = None,
 ) -> dict[str, int | None]:
     """Allocate ranks exactly as MySVD_origin's global greedy selector.
 
@@ -59,7 +72,8 @@ def allocate_greedy_ranks(
         else:
             left = torch.eye(out_features, device=target, dtype=weight.dtype)
         singular_values = torch.linalg.svdvals((left @ weight) @ right)
-        pool.extend((float(value.square() / cost), name, index, cost) for index, value in enumerate(singular_values))
+        scale = _energy_scale(name, energy_scales)
+        pool.extend((float(value.square() * scale / cost), name, index, cost) for index, value in enumerate(singular_values))
 
     pool.sort(key=lambda item: item[0], reverse=True)
     budget = int(total_original * rank_ratio)
@@ -101,6 +115,7 @@ def allocate_safe_greedy_ranks(
     device: str | torch.device,
     *,
     enable_pruning: bool = False,
+    energy_scales: Mapping[str, int] | None = None,
 ) -> dict[str, int | None]:
     """Allocate ranks with budget-consistent SAFE-SVD dynamic greedy search.
 
@@ -139,7 +154,7 @@ def allocate_safe_greedy_ranks(
         else:
             left = torch.eye(out_features, device=target, dtype=weight.dtype)
         singular_values = torch.linalg.svdvals((left @ weight) @ right)
-        energies[name] = singular_values.square().detach().cpu().tolist()
+        energies[name] = (singular_values.square() * _energy_scale(name, energy_scales)).detach().cpu().tolist()
         max_compressed_rank = min(
             len(energies[name]),
             (original - 1) // cost,
@@ -228,10 +243,11 @@ def allocate_ranks(
     device: str | torch.device,
     *,
     selector: RankSelector = "safe",
+    energy_scales: Mapping[str, int] | None = None,
 ) -> dict[str, int | None]:
     """Dispatch to a named, reproducible rank-allocation algorithm."""
     if selector == "legacy":
-        return allocate_greedy_ranks(model, left_whiteners, input_whiteners, rank_ratio, device)
+        return allocate_greedy_ranks(model, left_whiteners, input_whiteners, rank_ratio, device, energy_scales=energy_scales)
     if selector == "safe":
-        return allocate_safe_greedy_ranks(model, left_whiteners, input_whiteners, rank_ratio, device)
+        return allocate_safe_greedy_ranks(model, left_whiteners, input_whiteners, rank_ratio, device, energy_scales=energy_scales)
     raise ValueError(f"unknown rank selector {selector!r}; expected one of: {', '.join(RANK_SELECTORS)}")

@@ -1,24 +1,34 @@
-"""SAFE-SVD main flow, organized like the scripts in physic_model_comp.
+"""Standalone SAFE-SVD command-line entry point.
 
-The caller loads the model and selects calibration data first. This entry
-then runs input profiling, Fisher collection, rank selection, and compression.
+Run directly with --model mpp/vicon/poseidon to load model and calibration
+data, then run input profiling, Fisher collection, rank selection and compression.
 Cache paths must belong to the same checkpoint and calibration configuration.
 """
 
 from __future__ import annotations
 
+import argparse
+import inspect
 import json
+import sys
 from pathlib import Path
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+# Allow both python -m safe_svd.main and python safe_svd/main.py.
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from safe_svd.helper.perf_logger import make_perf_logger
 from safe_svd.helper.collector.input_collector import collect_inputs
 from safe_svd.helper.collector.fisher_collector import collect_fisher
 from safe_svd.helper.collector.vicon_attention import convert_attn_to_linear
 from safe_svd.rank import allocate_ranks
 from safe_svd.compress import compress
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def main(
@@ -60,6 +70,8 @@ def main(
     save_path=None,
     overwrite_cache=False,
     verbose=True,
+    pipeline_stage="all",
+    perf_csv_path=None,
 ):
     """Return the compressed nn.Module directly.
 
@@ -76,6 +88,8 @@ def main(
     # ===================================================================
     # 0. Configuration
     # ===================================================================
+    if pipeline_stage not in {"all", "rank_selection", "compression"}:
+        raise ValueError("pipeline_stage must be all, rank_selection, or compression")
     if model_type not in {"mpp", "vicon", "poseidon"}:
         raise ValueError("model_type must be mpp, vicon, or poseidon")
     if not 0 < rank_ratio <= 1 or not 0 <= alpha <= 1:
@@ -110,8 +124,20 @@ def main(
     if save_path is not None:
         filename = "compressed_model.pth" if model_type == "vicon" else "compressed_model.pt"
         final_path = save_path / filename
-        if final_path.exists() and not overwrite_cache:
+        if pipeline_stage != "rank_selection" and final_path.exists() and not overwrite_cache:
             raise FileExistsError(f"Model already exists: {final_path}; choose a new save_path or overwrite_cache=True")
+
+    if pipeline_stage == "compression":
+        if profile_cache is None or not profile_cache.is_file():
+            raise FileNotFoundError("compression stage requires an existing profile_cache")
+        if use_fisher and (fisher_cache is None or not fisher_cache.is_file()):
+            raise FileNotFoundError("compression stage requires an existing fisher_cache")
+        if rank_cache is None or not rank_cache.is_file():
+            raise FileNotFoundError("compression stage requires an existing rank_cache")
+        if overwrite_cache:
+            raise ValueError("compression-only cannot recompute caches; use pipeline_stage='all'")
+    perf = make_perf_logger(perf_csv_path, device=dev, method="safe_svd", model_name=model_type,
+                           rank_ratio=rank_ratio, alpha=alpha, dataset=dataset_name)
 
     # ===================================================================
     # 1. Prepare the loaded model and calibration data
@@ -160,105 +186,124 @@ def main(
     # ===================================================================
     if verbose:
         print("==== Step 1: Input Profiling ====", flush=True)
-    if profile_cache is not None and profile_cache.is_file() and not overwrite_cache:
-        cached_profile = torch.load(profile_cache, map_location="cpu", weights_only=True)
-        if "profile_mat" in cached_profile:
-            Rdict = cached_profile["profile_mat"]
-            input_sample_counts = cached_profile["sample_counts"]
+    with perf.stage("input_collection"):
+        if profile_cache is not None and profile_cache.is_file() and not overwrite_cache:
+            cached_profile = torch.load(profile_cache, map_location="cpu", weights_only=True)
+            if "profile_mat" in cached_profile:
+                Rdict = cached_profile["profile_mat"]
+                input_sample_counts = cached_profile["sample_counts"]
+            else:
+                Rdict = cached_profile  # Original MPP/VICON factors-only cache.
+                input_sample_counts = {}
+            if verbose:
+                print(f"Loaded input cache: {profile_cache}")
         else:
-            Rdict = cached_profile  # Original MPP/VICON factors-only cache.
-            input_sample_counts = {}
-        if verbose:
-            print(f"Loaded input cache: {profile_cache}")
-    else:
-        Rdict, input_sample_counts = collect_inputs(
-            model,
-            calibration_data,
-            model_type=model_type,
-            device=dev,
-            route_options=route_options,
-            whitening=whitening,
-            eps=eps_whiten,
-            eps_mode=eps_whiten_mode,
-            aggregation=aggregation,
-            trace_balance=trace_balance,
-            accumulation_dtype=input_accumulation_dtype,
+            Rdict = None
+        needs_counts = model_type == "poseidon" and whitening_mode == "new" and (
+            rank_cache is None or not rank_cache.is_file() or overwrite_cache
         )
-        if profile_cache is not None:
-            profile_cache.parent.mkdir(parents=True, exist_ok=True)
-            torch.save({"profile_mat": Rdict, "sample_counts": input_sample_counts}, profile_cache)
+        if Rdict is not None and needs_counts and not input_sample_counts:
+            if pipeline_stage == "compression":
+                raise ValueError("New Poseidon rank selection needs sample counts")
+            Rdict = None
+        if Rdict is None:
+            Rdict, input_sample_counts = collect_inputs(
+                model,
+                calibration_data,
+                model_type=model_type,
+                device=dev,
+                route_options=route_options,
+                whitening=whitening,
+                eps=eps_whiten,
+                eps_mode=eps_whiten_mode,
+                aggregation=aggregation,
+                trace_balance=trace_balance,
+                accumulation_dtype=input_accumulation_dtype,
+            )
+            if profile_cache is not None:
+                profile_cache.parent.mkdir(parents=True, exist_ok=True)
+                torch.save({"profile_mat": Rdict, "sample_counts": input_sample_counts}, profile_cache)
 
     # ===================================================================
     # 3. Fisher Collection: Ldict
     # ===================================================================
     if verbose:
         print("==== Step 2: Fisher Collection ====", flush=True)
-    Ldict = None
-    if use_fisher:
-        if fisher_cache is not None and fisher_cache.is_file() and not overwrite_cache:
-            Ldict = torch.load(fisher_cache, map_location="cpu", weights_only=True)
-            if verbose:
-                print(f"Loaded Fisher cache: {fisher_cache}")
-        else:
-            Ldict = collect_fisher(
-                model,
-                calibration_data,
-                model_type=model_type,
-                device=dev,
-                route_options=route_options,
-                aggregation=aggregation,
-                trace_balance=trace_balance,
-                loss_fn=fisher_loss_fn,
-            )
-            if fisher_cache is not None:
-                fisher_cache.parent.mkdir(parents=True, exist_ok=True)
-                torch.save(Ldict, fisher_cache)
+    with perf.stage("fisher_collection"):
+        Ldict = None
+        if use_fisher:
+            if fisher_cache is not None and fisher_cache.is_file() and not overwrite_cache:
+                Ldict = torch.load(fisher_cache, map_location="cpu", weights_only=True)
+                if verbose:
+                    print(f"Loaded Fisher cache: {fisher_cache}")
+            else:
+                Ldict = collect_fisher(
+                    model,
+                    calibration_data,
+                    model_type=model_type,
+                    device=dev,
+                    route_options=route_options,
+                    aggregation=aggregation,
+                    trace_balance=trace_balance,
+                    loss_fn=fisher_loss_fn,
+                )
+                if fisher_cache is not None:
+                    fisher_cache.parent.mkdir(parents=True, exist_ok=True)
+                    torch.save(Ldict, fisher_cache)
 
     # ===================================================================
     # 4. Rank Selection: rank_dict
     # ===================================================================
     if verbose:
         print("==== Step 3: Rank Selection ====", flush=True)
-    if rank_cache is not None and rank_cache.is_file() and not overwrite_cache:
-        rank_dict = json.loads(rank_cache.read_text())
+    with perf.stage("rank_selection"):
+        if rank_cache is not None and rank_cache.is_file() and not overwrite_cache:
+            rank_dict = json.loads(rank_cache.read_text())
+            if verbose:
+                print(f"Loaded rank cache: {rank_cache}")
+        else:
+            rank_dict = allocate_ranks(
+                model,
+                left_whiteners=Ldict,
+                input_whiteners=Rdict,
+                rank_ratio=rank_ratio,
+                device=dev,
+                selector=rank_selector,
+                energy_scales=input_sample_counts if model_type == "poseidon" and whitening_mode == "new" else None,
+            )
+            if rank_cache is not None:
+                rank_cache.parent.mkdir(parents=True, exist_ok=True)
+                rank_cache.write_text(json.dumps(rank_dict, indent=2) + "\n")
+
+    if pipeline_stage == "rank_selection":
         if verbose:
-            print(f"Loaded rank cache: {rank_cache}")
-    else:
-        rank_dict = allocate_ranks(
-            model,
-            left_whiteners=Ldict,
-            input_whiteners=Rdict,
-            rank_ratio=rank_ratio,
-            device=dev,
-            selector=rank_selector,
-        )
-        if rank_cache is not None:
-            rank_cache.parent.mkdir(parents=True, exist_ok=True)
-            rank_cache.write_text(json.dumps(rank_dict, indent=2) + "\n")
+            print(f"Rank selection completed: {rank_cache}")
+        return None
 
     # ===================================================================
     # 5. Compression: teacher/student layer-by-layer replacement
     # ===================================================================
     if verbose:
         print("==== Step 4: Compression ====", flush=True)
-    compressed_model = compress(
-        model,
-        calibration_data,
-        ranks=rank_dict,
-        model_type=model_type,
-        device=dev,
-        route_options=route_options,
-        left_metrics=Ldict,
-        input_metrics=Rdict,
-        alpha=alpha,
-        mode="clean" if compress_mode == "clean_input" else "combined",
-        whitening=whitening,
-        eps=eps_whiten,
-        eps_mode=eps_whiten_mode,
-        aggregation=aggregation,
-        trace_balance=trace_balance,
-        compute_dtype=compute_dtype,
-    )
+    with perf.stage("compression"):
+        compressed_model = compress(
+            model,
+            calibration_data,
+            ranks=rank_dict,
+            model_type=model_type,
+            device=dev,
+            route_options=route_options,
+            left_metrics=Ldict,
+            input_metrics=Rdict,
+            alpha=alpha,
+            mode="clean" if compress_mode == "clean_input" else "combined",
+            whitening=whitening,
+            eps=eps_whiten,
+            eps_mode=eps_whiten_mode,
+            aggregation=aggregation,
+            trace_balance=trace_balance,
+            compute_dtype=compute_dtype,
+        )
 
     # ===================================================================
     # 6. Save: use the original per-model checkpoint format
@@ -276,3 +321,379 @@ def main(
 
 
 run_safe_svd = main
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Unified SAFE-SVD: load -> input -> Fisher -> rank -> compress")
+    parser.add_argument("--model", "--model_type", dest="model_type", choices=("mpp", "vicon", "poseidon"), required=True)
+    parser.add_argument("--DEV", "--device", dest="DEV", default="cuda")
+    parser.add_argument("--ckpt_path", "--model_path", dest="ckpt_path", type=Path)
+    parser.add_argument("--data_root", "--data_path", dest="data_root", type=Path)
+    parser.add_argument("--rank_ratio", type=float)
+    parser.add_argument("--rank_selector", choices=("legacy", "safe"))
+    parser.add_argument("--alpha", type=float, default=0.7)
+    parser.add_argument("--use_fisher", choices=("y", "n"), default="y")
+    parser.add_argument("--fisher_loss", "--gradient_loss", dest="gradient_loss", choices=("l1", "mse", "smooth_l1"), default="l1")
+    parser.add_argument("--balance_ratio", type=float, default=10.0)
+    parser.add_argument("--decay_alpha", type=float, default=1.0)
+    parser.add_argument("--use_trace_balance", "--use_trace_align", dest="use_trace_balance", choices=("y", "n"))
+    parser.add_argument("--compress_mode", choices=("comb", "clean_input"), default="comb")
+    parser.add_argument("--whitening_mode", choices=("origin", "new"))
+    parser.add_argument("--whitening_eps", "--eps_whiten", dest="eps_whiten", type=float, default=1e-6)
+    parser.add_argument("--whitening_eps_mode", "--eps_whiten_mode", dest="eps_whiten_mode",
+                        choices=("absolute", "relative", "sum_equivalent"), default="absolute")
+    parser.add_argument("--calibration_seed", default=None, metavar="default|SEED")
+    parser.add_argument("--batch_size", type=int)
+    parser.add_argument("--fisher_batch_size", type=int, default=16)
+    parser.add_argument("--capture_batch_size", type=int, default=64)
+    parser.add_argument("--pipeline_stage", choices=("all", "rank_selection", "compression"), default="all")
+    parser.add_argument("--profile_cache", type=Path)
+    parser.add_argument("--fisher_cache", type=Path)
+    parser.add_argument("--rank_cache", "--rank_path", dest="rank_cache", type=Path)
+    parser.add_argument("--cache_dir", type=Path)
+    parser.add_argument("--rank_root", type=Path)
+    parser.add_argument("--save_path", type=Path)
+    parser.add_argument("--overwrite_cache", action="store_true")
+    parser.add_argument("--dry_run", action="store_true", help="Print paths/configuration without importing model runtimes or loading assets")
+
+    # MPP arguments, retaining the names in MySVD/mysvd.py.
+    parser.add_argument("--yaml_config", type=Path)
+    parser.add_argument("--config", default="basic_config")
+    parser.add_argument("--calibration_num", type=int)
+
+    # VICON arguments; compose its original Hydra configuration explicitly.
+    parser.add_argument("--config_dir", type=Path)
+    parser.add_argument("--config_name", default="default")
+    parser.add_argument("--config_override", action="append", default=[], metavar="KEY=VALUE")
+    parser.add_argument("--random_calibration", choices=("y", "n"), default="n")
+    parser.add_argument("--rank_type", default="MySVD_Rank", choices=("MySVD_Rank",))
+    parser.add_argument("--dataset_workers", type=int)
+
+    # Poseidon arguments, retaining SAFE_SVD/safe_svd.py's trajectory semantics.
+    parser.add_argument("--model_name", default="Poseidon-L")
+    parser.add_argument("--dataset", default="fluids.incompressible.PiecewiseConstants")
+    parser.add_argument("--traj_num", type=int, default=64)
+    parser.add_argument("--use_phyloss", default="no_phyloss")
+    parser.add_argument("--final_time", type=int, default=20)
+    parser.add_argument("--order_control", type=int, default=2)
+    parser.add_argument("--compression_backend", choices=("GPU", "low-gpu"), default="GPU")
+    parser.add_argument("--gpu_profile", action="store_true")
+    args = parser.parse_args(argv)
+
+    # Model-specific defaults match the original model scripts.
+    if args.rank_ratio is None:
+        args.rank_ratio = {"mpp": 0.4, "vicon": 0.8, "poseidon": 0.2}[args.model_type]
+    if args.rank_selector is None:
+        args.rank_selector = "safe" if args.model_type == "poseidon" else "legacy"
+    if args.calibration_num is None:
+        args.calibration_num = 2048 if args.model_type == "vicon" else 16
+    if args.whitening_mode is None:
+        args.whitening_mode = "origin" if args.model_type == "poseidon" else "new"
+    if args.use_trace_balance is None:
+        args.use_trace_balance = "n" if args.model_type == "poseidon" else "y"
+    if args.calibration_seed is None:
+        args.calibration_seed = {"mpp": 42, "vicon": 2026, "poseidon": None}[args.model_type]
+    elif args.calibration_seed == "default":
+        if args.model_type != "poseidon":
+            parser.error("calibration_seed=default is only supported by Poseidon")
+        args.calibration_seed = None
+    else:
+        try:
+            args.calibration_seed = int(args.calibration_seed)
+        except ValueError:
+            parser.error("calibration_seed must be default or a non-negative integer")
+    if args.calibration_seed is not None and args.calibration_seed < 0:
+        parser.error("calibration_seed must be non-negative")
+    if not 0 < args.rank_ratio <= 1 or not 0 <= args.alpha <= 1:
+        parser.error("rank_ratio must be in (0,1], alpha in [0,1]")
+    if args.calibration_num <= 0 or args.traj_num <= 0 or args.final_time <= 0:
+        parser.error("Calibration sizes and final_time must be positive")
+    if args.batch_size is not None and args.batch_size <= 0:
+        parser.error("batch_size must be positive")
+    if args.fisher_batch_size <= 0 or args.capture_batch_size <= 0:
+        parser.error("fisher_batch_size and capture_batch_size must be positive")
+    if args.dataset_workers is not None and args.dataset_workers < 0:
+        parser.error("dataset_workers must be non-negative")
+    if args.model_type == "mpp" and args.gradient_loss == "smooth_l1":
+        parser.error("MPP original Fisher supports l1 or mse")
+    if args.model_type == "vicon" and args.calibration_num < (args.batch_size or 128):
+        parser.error("VICON calibration_num must be at least batch_size")
+    if args.eps_whiten <= 0 or args.order_control < 0:
+        parser.error("whitening_eps must be positive and order_control non-negative")
+    return args
+
+
+def resolve_cli_paths(args):
+    # Model code comes only from official checkouts inside this repository.
+    # User-supplied file paths are relative to the invocation directory.
+    if args.model_type == "mpp":
+        args.runtime_root = PROJECT_ROOT / "mpp/multiple_physics_pretraining"
+        prepared_config = PROJECT_ROOT / "data/official/configs/mpp_avit_L.yaml"
+        default_config = prepared_config if prepared_config.is_file() else args.runtime_root / "config/mpp_avit_L_config.yaml"
+        default_checkpoint = PROJECT_ROOT / "models/MPP/MPP_AViT_L"
+        default_data = PROJECT_ROOT / "data/official/mpp"
+        calibration_tag = f"cali{args.calibration_num}_seed{args.calibration_seed}"
+    elif args.model_type == "vicon":
+        args.runtime_root = PROJECT_ROOT / "vicon/VICON"
+        if not (args.runtime_root / "src").is_dir():
+            args.runtime_root = PROJECT_ROOT / "VICON"
+        default_config = args.runtime_root / "configs"
+        default_checkpoint = PROJECT_ROOT / "models/VICON/model.pth"
+        default_data = PROJECT_ROOT / "data/VICON"
+        calibration_tag = f"cali{args.calibration_num}"
+        if args.random_calibration == "y":
+            calibration_tag += f"_random_seed{args.calibration_seed}"
+    else:
+        args.runtime_root = PROJECT_ROOT / "poseidon"
+        default_config = None
+        default_checkpoint = PROJECT_ROOT / "models/poseidon" / args.dataset
+        default_data = PROJECT_ROOT / "poseidon/camlab-ethz/down_streams"
+        calibration_tag = f"traj{args.traj_num}"
+        if args.calibration_seed is not None:
+            calibration_tag += f"_random_seed{args.calibration_seed}"
+        calibration_tag += f"_ftime{args.final_time}"
+    args.ckpt_path = args.ckpt_path.expanduser().resolve() if args.ckpt_path is not None else default_checkpoint
+    args.data_root = args.data_root.expanduser().resolve() if args.data_root is not None else default_data
+    if args.model_type == "mpp":
+        args.yaml_config = args.yaml_config.expanduser().resolve() if args.yaml_config is not None else default_config
+    elif args.model_type == "vicon":
+        args.config_dir = args.config_dir.expanduser().resolve() if args.config_dir is not None else default_config
+    trace_tag = "trace" if args.use_trace_balance == "y" else "notrace"
+    whitening_tag = f"{args.whitening_mode}_eps{args.eps_whiten_mode}{args.eps_whiten}"
+    if args.model_type == "poseidon" and args.whitening_mode == "new":
+        whitening_tag += "_rankscale"
+    dataset_tag = args.dataset if args.model_type == "poseidon" else args.model_type
+    input_tag = f"{calibration_tag}_{trace_tag}_{whitening_tag}"
+    if args.batch_size is not None:
+        input_tag += f"_bs{args.batch_size}"
+    fisher_tag = f"{input_tag}_{args.gradient_loss}_br{args.balance_ratio}_decay{args.decay_alpha}"
+    if args.model_type == "poseidon":
+        fisher_tag += f"_order{args.order_control}"
+    checkpoint_tag = args.model_name if args.model_type == "poseidon" else args.ckpt_path.stem
+    args.cache_dir = args.cache_dir.expanduser().resolve() if args.cache_dir else PROJECT_ROOT / "artifacts/cache" / dataset_tag / checkpoint_tag
+    args.profile_cache = args.profile_cache.expanduser().resolve() if args.profile_cache else args.cache_dir / "input" / input_tag / "profiling_mat.pt"
+    args.fisher_cache = args.fisher_cache.expanduser().resolve() if args.fisher_cache else args.cache_dir / "fisher" / fisher_tag / "Ldict.pt"
+    args.rank_root = args.rank_root.expanduser().resolve() if args.rank_root else PROJECT_ROOT / "artifacts/ranks" / dataset_tag / checkpoint_tag
+    rank_tag = f"{fisher_tag}_{args.rank_selector}_{args.use_fisher}"
+    if args.model_type == "vicon":
+        rank_tag += f"_{args.rank_type}"
+    args.rank_cache = args.rank_cache.expanduser().resolve() if args.rank_cache else args.rank_root / rank_tag / f"rank_{args.rank_ratio}.json"
+    args.save_path = args.save_path.expanduser().resolve() if args.save_path else (
+        PROJECT_ROOT / "artifacts/compressed" / dataset_tag / checkpoint_tag / str(args.rank_ratio) /
+        f"{rank_tag}_alpha{args.alpha}_{args.compress_mode}_{args.compression_backend}"
+    )
+    return args
+
+
+def load_model_and_data(args):
+    """Load a repository-local official model and its calibration data."""
+    package_root = args.runtime_root.resolve()
+    if not package_root.is_relative_to(PROJECT_ROOT.resolve()):
+        raise ValueError(f"Model source must be inside this repository: {package_root}")
+    device = torch.device(args.DEV)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA is unavailable; pass --DEV cpu")
+    if not args.ckpt_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {args.ckpt_path}")
+    params, trainer, rollout_fn = None, None, None
+    args.train_seed = None
+    args.batches_per_dset = 16
+    args.max_calib_batches = None
+
+    # ===================================================================
+    # MPP: YAML -> AViT checkpoint -> training datasets
+    # ===================================================================
+    if args.model_type == "mpp":
+        if not (package_root / "models/avit.py").is_file():
+            raise FileNotFoundError(f"Official MPP source is missing: {package_root}/models/avit.py. "
+                                    "Install the full PolymathicAI/multiple_physics_pretraining checkout under mpp/.")
+        sys.path.insert(0, str(package_root.parent))
+        from multiple_physics_pretraining.utils.YParams import YParams
+        from multiple_physics_pretraining.models.avit import build_avit
+        from multiple_physics_pretraining.data_utils.datasets import get_data_loader
+        if not args.ckpt_path.is_file():
+            raise ValueError("MPP --ckpt_path must be a checkpoint file")
+        params = YParams(str(args.yaml_config), args.config)
+        params.use_ddp = False
+        params.log_to_wandb = False
+        if args.batch_size is not None:
+            params["batch_size"] = args.batch_size
+        data_root = args.data_root
+        for field in ("train_data_paths", "valid_data_paths"):
+            rebased = []
+            for path_spec in getattr(params, field):
+                path_spec = list(path_spec)
+                path = Path(path_spec[0]).expanduser()
+                if not path.is_absolute():
+                    path = data_root / path
+                path_spec[0] = str(path)
+                rebased.append(path_spec)
+            setattr(params, field, rebased)
+        print(f"==== Loading MPP model: {args.ckpt_path} ====", flush=True)
+        model = build_avit(params).to(device)
+        checkpoint = torch.load(args.ckpt_path, map_location=device, weights_only=False)
+        state_dict = checkpoint.get("model_state", checkpoint.get("model_state_dict", checkpoint.get("state_dict", checkpoint)))
+        state_dict = {key.removeprefix("module."): value for key, value in state_dict.items()}
+        model.load_state_dict(state_dict)
+        model.eval()
+        print("==== Loading MPP train_dataset ====", flush=True)
+        _, calibration_data, _ = get_data_loader(
+            params, params.train_data_paths, distributed=False, split="train", rank=0,
+            train_offset=params.embedding_offset,
+        )
+        # This division is the actual sampling rule in the original MPP main.
+        args.batches_per_dset = args.calibration_num / params.batch_size
+        print(f"MPP calibration batch limit per file: {args.batches_per_dset}")
+
+    # ===================================================================
+    # VICON: Hydra config -> ICON checkpoint/trainer -> calib_loaders
+    # ===================================================================
+    elif args.model_type == "vicon":
+        if not (package_root / "src").is_dir():
+            raise FileNotFoundError(f"Official VICON source is missing: {package_root}/src. "
+                                    "Install the full Eydcao/VICON checkout under vicon/VICON/.")
+        # This checkout also uses absolute imports such as model_utils/utils.
+        sys.path.insert(0, str(package_root.parent))
+        sys.path.insert(0, str(package_root / "src"))
+        from hydra import compose, initialize_config_dir
+        from omegaconf import open_dict
+        import VICON.src.models as models
+        import VICON.src.trainer as trainer_module
+        from VICON.src.dataset import all_datasets
+        from safe_svd.helper.collector.vicon_calibration_dataset import build_calibration_loaders
+        with initialize_config_dir(config_dir=str(args.config_dir.resolve()), version_base=None):
+            cfg = compose(config_name=args.config_name, overrides=args.config_override)
+        with open_dict(cfg):
+            if args.dataset_workers is not None:
+                cfg.dataset_workers = args.dataset_workers
+            dataset_configs = cfg.datasets.types if hasattr(cfg.datasets, "types") else cfg.datasets
+            for name, dataset_config in dataset_configs.items():
+                for field in ("folder", "path", "data_path"):
+                    if not hasattr(dataset_config, field):
+                        continue
+                    path = Path(getattr(dataset_config, field)).expanduser()
+                    explicit = any(override.lstrip("+").startswith((f"datasets.types.{name}.{field}=", f"datasets.{name}.{field}="))
+                                   for override in args.config_override)
+                    if args.data_root is not None and not explicit:
+                        relative = Path(path.name) if path.is_absolute() or ".." in path.parts else path
+                        path = args.data_root / relative
+                    elif not path.is_absolute():
+                        path = Path.cwd() / path
+                    setattr(dataset_config, field, str(path.resolve()))
+        constructor = models.ICON_CROPPED if cfg.model.type == "crop" else models.ICON_UNCROPPED
+        model = constructor(cfg.model)
+        # Original Trainer has a module-global default device; honor --DEV.
+        trainer_module.device = device
+        trainer = trainer_module.Trainer(model, cfg.model, cfg.opt, cfg.loss, trainable_mode=cfg.trainable_mode)
+        trainer.device = device
+        checkpoint = torch.load(args.ckpt_path, map_location=device, weights_only=False)
+        state_dict = checkpoint.get("model_state_dict", checkpoint.get("state_dict", checkpoint))
+        trainer.model.load_state_dict({key.removeprefix("module."): value for key, value in state_dict.items()})
+        model = trainer.model.to(device).eval()
+        print("==== Loading VICON calibration datasets ====", flush=True)
+        dataset_seed = args.calibration_seed if args.random_calibration == "y" else cfg.train_seed
+        if "rollout_cfg" in inspect.signature(all_datasets).parameters:
+            datasets = all_datasets(cfg.datasets, 0, dataset_seed, "train", cfg.rollout)
+        else:
+            datasets = all_datasets(cfg.datasets, 0, dataset_seed, "train")
+        batch_size = args.batch_size or 128
+        calibration_data = build_calibration_loaders(
+            datasets, calibration_num=args.calibration_num, batch_size=batch_size,
+            num_workers=cfg.dataset_workers, random_calibration=args.random_calibration == "y",
+            calibration_seed=args.calibration_seed,
+        )
+        args.max_calib_batches = int(args.calibration_num / batch_size)
+        args.train_seed = cfg.train_seed
+
+    # ===================================================================
+    # Poseidon: complete training trajectories -> get_trainer/checkpoint
+    # ===================================================================
+    else:
+        if not (package_root / "scOT").is_dir():
+            raise FileNotFoundError(f"Official Poseidon source is missing: {package_root}/scOT. "
+                                    "Install the camlab-ethz/poseidon checkout under poseidon/.")
+        sys.path.insert(0, str(package_root))
+        from scOT.inference import get_trainer, rollout
+        from scOT.problems.base import get_dataset
+        from safe_svd.helper.collector.poseidon.calibration_dataset import build_calibration_dataset
+        dataset_kwargs = {"data_path": str(args.data_root)}
+        if "elliptic" not in args.dataset:
+            dataset_kwargs.update(fix_input_to_time_step=None, time_step_size=1, max_num_time_steps=args.final_time)
+        print(f"==== Loading Poseidon calibration trajectories: {args.dataset} ====", flush=True)
+        calibration_data = build_calibration_dataset(
+            get_dataset, dataset_name=args.dataset, num_trajectories=args.traj_num,
+            random_calibration=args.calibration_seed is not None,
+            calibration_seed=args.calibration_seed or 0, **dataset_kwargs,
+        )
+        print(f"==== Loading Poseidon model: {args.ckpt_path} ====", flush=True)
+        trainer = get_trainer(model_path=str(args.ckpt_path), batch_size=args.batch_size or 256,
+                              dataset=calibration_data, workers=1)
+        # Match the fork's effective zero-worker, metadata-preserving rollout.
+        trainer.args.dataloader_num_workers = 0
+        trainer.args.remove_unused_columns = False
+        model = trainer.model.to(device).eval()
+        rollout_fn = rollout
+    return model, calibration_data, params, trainer, rollout_fn
+
+
+def cli_main(argv=None):
+    args = resolve_cli_paths(parse_args(argv))
+    print("==== Unified SAFE-SVD configuration ====", flush=True)
+    print(f"Model: {args.model_type}; device: {args.DEV}; rank_selector: {args.rank_selector}; rank_ratio: {args.rank_ratio}")
+    print(f"Official model package: {args.runtime_root}")
+    if args.model_type == "poseidon":
+        print(f"Dataset: {args.dataset}; traj_num: {args.traj_num}; final_time: {args.final_time}; calibration_seed: {args.calibration_seed if args.calibration_seed is not None else 'default'}")
+    else:
+        print(f"Calibration_num: {args.calibration_num}; calibration_seed: {args.calibration_seed}; trace: {args.use_trace_balance}")
+    print(f"Whitening: {args.whitening_mode}/{args.eps_whiten_mode}/{args.eps_whiten}; Fisher: {args.use_fisher}/{args.gradient_loss}; stage: {args.pipeline_stage}")
+    print(f"Checkpoint: {args.ckpt_path}")
+    print(f"Data root: {args.data_root}")
+    print(f"Input cache: {args.profile_cache}")
+    print(f"Fisher cache: {args.fisher_cache}")
+    print(f"Rank cache: {args.rank_cache}")
+    print(f"Output: {args.save_path}")
+    if args.dry_run:
+        return 0
+    model, calibration_data, params, trainer, rollout_fn = load_model_and_data(args)
+    main(
+        model, calibration_data,
+        model_type=args.model_type,
+        rank_ratio=args.rank_ratio,
+        device=args.DEV,
+        params=params,
+        trainer=trainer,
+        rollout_fn=rollout_fn,
+        dataset_name=args.dataset if args.model_type == "poseidon" else None,
+        use_fisher=args.use_fisher,
+        rank_selector=args.rank_selector,
+        alpha=args.alpha,
+        compress_mode=args.compress_mode,
+        gradient_loss=args.gradient_loss,
+        balance_ratio=args.balance_ratio,
+        decay_alpha=args.decay_alpha,
+        order_control=args.order_control,
+        calibration_seed=args.calibration_seed,
+        batches_per_dset=args.batches_per_dset,
+        max_calib_batches=args.max_calib_batches,
+        train_seed=args.train_seed,
+        fisher_batch_size=args.fisher_batch_size,
+        capture_batch_size=args.capture_batch_size,
+        use_trace_balance=args.use_trace_balance,
+        whitening_mode=args.whitening_mode,
+        eps_whiten=args.eps_whiten,
+        eps_whiten_mode=args.eps_whiten_mode,
+        compute_dtype=torch.float32 if args.compression_backend == "low-gpu" else torch.float64,
+        offload_cache=args.compression_backend == "low-gpu",
+        profile_cache=args.profile_cache,
+        fisher_cache=args.fisher_cache,
+        rank_cache=args.rank_cache,
+        save_path=args.save_path,
+        overwrite_cache=args.overwrite_cache,
+        pipeline_stage=args.pipeline_stage,
+        perf_csv_path=args.save_path / "gpu_profile.csv" if args.gpu_profile else None,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli_main())
