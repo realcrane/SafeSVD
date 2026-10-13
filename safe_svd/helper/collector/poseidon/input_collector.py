@@ -142,7 +142,7 @@ def run_rollout(trainer, dataset, rollout_fn=None):
         from scOT.inference import rollout as rollout_fn
     return rollout_fn(
         trainer, dataset,
-        model_path=getattr(getattr(trainer.model, "config", None), "name_or_path", ""),
+        # model_path=getattr(getattr(trainer.model, "config", None), "name_or_path", ""),
     )
 
 

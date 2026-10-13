@@ -5,6 +5,7 @@ data/
 checkpoints/
 rank_cache/
 compressed_models/
+__pycache__
 
 # Experiment outputs
 outputs/
