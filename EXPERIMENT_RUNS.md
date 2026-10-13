@@ -4,16 +4,18 @@ This is the canonical ledger for SAFE-SVD experiments launched from this
 repository. It records only SAFE-SVD compression and SAFE-SVD evaluation runs;
 unrelated projects and other low-rank methods are out of scope.
 
-Last reconciliation attempt: 2026-08-29 07:15:53 BST (2026-08-29 14:15:53 Asia/Shanghai).
+Last reconciliation: 2026-08-31 02:36:15 BST (2026-08-31 09:36:15 Asia/Shanghai).
 
 The remote path `/cs/research/vecg/EasyPDE/SAFE-SVD-v0` is on a shared
 filesystem, so identical artifacts observed from several hosts are recorded
-once. This reconciliation could not reach any UCL host: local DNS failed to
-resolve the configured jump host `knuckles.cs.ucl.ac.uk`, and direct SSH to
-`brent-l.cs.ucl.ac.uk` also failed. `check_ucl_gpus` therefore returned zero
-reachable hosts. The statuses and metrics below remain the latest trustworthy
-artifact observations from `2026-08-28 16:40:51 BST`; no remote state change
-could be verified in this check.
+once. The local `check_ucl_gpus` probe still reported jump-host DNS errors, but
+direct read-only SSH through `knuckles.cs.ucl.ac.uk` reached `brent`, `ruddy`,
+and `smew`. This reconciliation verified that the seed-1 and seed-1204
+compression jobs reached 815/815 and wrote final compressed models. Their
+processes have exited; seed-1204's tmux session remains at an idle shell. No
+`metrics.json` exists for either run, so physical evaluation has not been
+verified. `brent` and `ruddy` were selected because each had an idle NVIDIA
+GeForce RTX 3090 Ti before launch.
 
 ## 未开始
 
@@ -57,13 +59,91 @@ could be verified in this check.
 
 ## 正在运行
 
+No SAFE-SVD runs are currently verified as running.
+
+## 已完成
+
+### `poseidon_safe_seed1_r0.2`
+
+- Status: `已完成`
+- Outcome: `success` (compression); physical evaluation not found.
+- Task: Poseidon SAFE-SVD compression with calibration seed `1`.
+- Hyperparameters: dataset `fluids.incompressible.PiecewiseConstants`; rank ratio `0.2`; rank selector `safe`; calibration size `64`; calibration seed `1`; `Poseidon-L`; `--fast`; final time `20`; alpha `0.7`; device `cuda`.
+- Host / GPU: `brent`, GPU 0, NVIDIA GeForce RTX 3090 Ti.
+- tmux: `poseidon_safe_seed1_r0p2` (created `2026-08-29 08:13:34 BST`; no session at the last check because the process exited).
+- Command:
+
+  ```bash
+  python -m safesvd.cli compress \
+    --model poseidon \
+    --checkpoint models/poseidon/fluids.incompressible.PiecewiseConstants \
+    --data-root poseidon/camlab-ethz/down_streams \
+    --calibration-seed 1 \
+    --rank-ratio 0.2 \
+    --rank-selector safe \
+    --calibration-size 64 \
+    --dataset fluids.incompressible.PiecewiseConstants \
+    --final-time 20 \
+    -- \
+    --model_name Poseidon-L \
+    --fast
+  ```
+
+- Log: `/cs/research/vecg/EasyPDE/SAFE-SVD-v0/logs/poseidon_safe_seed1_r0p2.log` (46,367 B; mtime `2026-08-29 14:38:35 BST`).
+- Checkpoint / output: `/cs/research/vecg/EasyPDE/SAFE-SVD-v0/artifacts/poseidon/paper/safe/0.2/fluids.incompressible.PiecewiseConstants/traj64_seed1_ftime20/compressed/compressed_model.pt` (532,493,038 B).
+- Submitted / started: process start `2026-08-29 08:13:40 BST` (PID `217780`, backend PID `217781`).
+- Completed: final model mtime `2026-08-29 14:38:35 BST`; log reports `815/815` and the saved model path.
+- Last checked: `2026-08-31 02:34:27 BST`.
+
+#### Results
+
+- Source: final checkpoint and `/cs/research/vecg/EasyPDE/SAFE-SVD-v0/logs/poseidon_safe_seed1_r0p2.log`, checked `2026-08-31 02:34:27 BST`.
+- No `metrics.json` was found in the run root. Compression is complete, but no physical-evaluation metrics are available for this seed.
+
+### `poseidon_safe_seed1204_r0.2`
+
+- Status: `已完成`
+- Outcome: `success` (compression); physical evaluation not found.
+- Task: Poseidon SAFE-SVD compression with calibration seed `1204`.
+- Hyperparameters: dataset `fluids.incompressible.PiecewiseConstants`; rank ratio `0.2`; rank selector `safe`; calibration size `64`; calibration seed `1204`; `Poseidon-L`; `--fast`; final time `20`; alpha `0.7`; device `cuda`.
+- Host / GPU: `ruddy`, GPU 0, NVIDIA GeForce RTX 3090 Ti; 21,801 MiB used and 0% utilization at the last check, consistent with no active run.
+- tmux: `poseidon_safe_seed1204_r0p2` (created `2026-08-29 08:13:29 BST`; session remains at an idle shell after completion).
+- Command:
+
+  ```bash
+  python -m safesvd.cli compress \
+    --model poseidon \
+    --checkpoint models/poseidon/fluids.incompressible.PiecewiseConstants \
+    --data-root poseidon/camlab-ethz/down_streams \
+    --calibration-seed 1204 \
+    --rank-ratio 0.2 \
+    --rank-selector safe \
+    --calibration-size 64 \
+    --dataset fluids.incompressible.PiecewiseConstants \
+    --final-time 20 \
+    -- \
+    --model_name Poseidon-L \
+    --fast
+  ```
+
+- Log: `/cs/research/vecg/EasyPDE/SAFE-SVD-v0/logs/poseidon_safe_seed1204_r0p2.log` (52,350 B; mtime `2026-08-29 15:52:56 BST`).
+- Checkpoint / output: `/cs/research/vecg/EasyPDE/SAFE-SVD-v0/artifacts/poseidon/paper/safe/0.2/fluids.incompressible.PiecewiseConstants/traj64_seed1204_ftime20/compressed/compressed_model.pt` (532,533,206 B).
+- Submitted / started: process start `2026-08-29 08:13:34 BST` (PID `2369733`, backend PID `2369734`).
+- Completed: final model mtime `2026-08-29 15:52:55 BST`; log reports `815/815` and the saved model path.
+- Last checked: `2026-08-31 02:36:15 BST`.
+
+#### Results
+
+- Source: final checkpoint and `/cs/research/vecg/EasyPDE/SAFE-SVD-v0/logs/poseidon_safe_seed1204_r0p2.log`, checked `2026-08-31 02:36:15 BST`.
+- No `metrics.json` was found in the run root. Compression is complete, but no physical-evaluation metrics are available for this seed.
+
 ### `poseidon_safe_seed42_r0.2`
 
-- Status: `正在运行`
-- Outcome: `pending`
-- Task: Poseidon SAFE-SVD compression.
+- Status: `已完成`
+- Outcome: `success`
+- Task: Poseidon SAFE-SVD compression followed by physical evaluation.
 - Hyperparameters: dataset `fluids.incompressible.PiecewiseConstants`; rank ratio `0.2`; rank selector `safe`; calibration size `64`; calibration seed `42`; `Poseidon-L`; `--fast`; final time `20`; alpha `0.7`; device `cuda`.
-- Host / GPU: `ruddy`, GPU 0, NVIDIA GeForce RTX 3090 Ti; about 4.75 / 24.56 GiB used and 84% utilization at last check.
+- Host / GPU: `ruddy`, GPU 0, NVIDIA GeForce RTX 3090 Ti; compression session is idle at the shell after completion.
 - tmux: `new_rank_seed42` (created `2026-08-28 07:49:49 BST`).
 - Command:
 
@@ -83,20 +163,25 @@ could be verified in this check.
     --fast
   ```
 
-- Log: tmux pane/stdout-stderr on `/dev/pts/2`; no independent `.log` found.
-- Checkpoint / output: `/cs/research/vecg/EasyPDE/SAFE-SVD-v0/artifacts/poseidon/paper/safe/0.2/fluids.incompressible.PiecewiseConstants/traj64_seed42_ftime20/`; temporary `compressed/compressing_model.pt` is 883,747,949 B; final model and metrics are not present.
+- Log: compression output was captured in tmux; no independent compression `.log` was found. Evaluation output was observed in the shared `brent` `svd` tmux session.
+- Checkpoint / output: `/cs/research/vecg/EasyPDE/SAFE-SVD-v0/artifacts/poseidon/paper/safe/0.2/fluids.incompressible.PiecewiseConstants/traj64_seed42_ftime20/compressed/compressed_model.pt` (532,531,526 B); metrics at the same run root.
 - Submitted / started: process start `2026-08-28 07:50:23 BST` (PID `104165`, backend PID `104166`).
-- Completed: not completed.
-- Last checked: `2026-08-28 16:40:51 BST` (latest successful check); recheck attempted `2026-08-29 07:15:53 BST` but UCL DNS/SSH was unavailable.
-- Notes: tmux showed `592/815` layers (73%), current layer `decoder.layers.1.upsample.upsample`, with an estimated 2 h 49 min remaining. The remote login banner reported about 93% disk-quota usage. The current Poseidon runtime resumes automatically from `compressed/compressing_model.pt` when `--overwrite` is absent; no relaunch was attempted because the host was unreachable and the old process could not be ruled out.
+- Completed: compressed model mtime `2026-08-28 18:49:37 BST`; evaluation metrics mtime `2026-08-29 07:41:57 BST`.
+- Last checked: `2026-08-29 08:17:02 BST`.
+
+#### Results
+
+- Source: `/cs/research/vecg/EasyPDE/SAFE-SVD-v0/artifacts/poseidon/paper/safe/0.2/fluids.incompressible.PiecewiseConstants/traj64_seed42_ftime20/metrics.json`, checked `2026-08-29 08:17:02 BST`.
+- Compressed metrics: base loss `0.00240649`, continuity `0.0226094`, momentum `0.949849`, h1 error `0.0747666`, Sobolev s012 `5.43859`, vorticity error `0.0754400`.
+- Interpretation: relative changes are base loss `+3.29%`, continuity `+0.65%`, momentum `-0.06%`, h1 `+1.53%`, Sobolev s012 `+2.38%`, and vorticity `+1.39%`; the evaluated compressed model remains close to the origin model.
 
 ### `poseidon_safe_seed7_r0.2`
 
-- Status: `正在运行`
-- Outcome: `pending`
-- Task: Poseidon SAFE-SVD compression.
+- Status: `已完成`
+- Outcome: `success`
+- Task: Poseidon SAFE-SVD compression followed by physical evaluation.
 - Hyperparameters: dataset `fluids.incompressible.PiecewiseConstants`; rank ratio `0.2`; rank selector `safe`; calibration size `64`; calibration seed `7`; `Poseidon-L`; `--fast`; final time `20`; alpha `0.7`; device `cuda`.
-- Host / GPU: `smew`, GPU 0, NVIDIA GeForce RTX 3090 Ti; about 5.97 / 24.56 GiB used and 98% utilization at last check.
+- Host / GPU: `smew`, GPU 0, NVIDIA GeForce RTX 3090 Ti; compression session is idle at the shell after completion.
 - tmux: `new_rank_seed7` (created `2026-08-28 14:27:52 BST`).
 - Command:
 
@@ -116,14 +201,17 @@ could be verified in this check.
     --fast
   ```
 
-- Log: tmux pane/stdout-stderr; no independent `.log` found.
-- Checkpoint / output: `/cs/research/vecg/EasyPDE/SAFE-SVD-v0/artifacts/poseidon/paper/safe/0.2/fluids.incompressible.PiecewiseConstants/traj64_seed7_ftime20/`; temporary `compressed/compressing_model.pt` is 2,502,460,411 B; final model and metrics are not present.
+- Log: compression output was captured in tmux; no independent compression `.log` was found. Evaluation output was observed in the shared `brent` `svd` tmux session.
+- Checkpoint / output: `/cs/research/vecg/EasyPDE/SAFE-SVD-v0/artifacts/poseidon/paper/safe/0.2/fluids.incompressible.PiecewiseConstants/traj64_seed7_ftime20/compressed/compressed_model.pt` (532,533,726 B); metrics at the same run root.
 - Submitted / started: process start `2026-08-28 14:28:24 BST` (PID `166151`, backend PID `166152`).
-- Completed: not completed.
-- Last checked: `2026-08-28 16:40:51 BST`.
-- Notes: tmux showed `269/815` layers (33%), current layer `encoder.layers.2.blocks.5.intermediate.dense`, with an estimated 4 h 09 min remaining. The remote login banner reported about 93% disk-quota usage.
+- Completed: compressed model mtime `2026-08-28 22:10:24 BST`; evaluation metrics mtime `2026-08-29 07:58:12 BST`.
+- Last checked: `2026-08-29 08:17:02 BST`.
 
-## 已完成
+#### Results
+
+- Source: `/cs/research/vecg/EasyPDE/SAFE-SVD-v0/artifacts/poseidon/paper/safe/0.2/fluids.incompressible.PiecewiseConstants/traj64_seed7_ftime20/metrics.json`, checked `2026-08-29 08:17:02 BST`.
+- Compressed metrics: base loss `0.00241412`, continuity `0.0225925`, momentum `0.949806`, h1 error `0.0749315`, Sobolev s012 `5.44372`, vorticity error `0.0756085`.
+- Interpretation: relative changes are base loss `+3.62%`, continuity `+0.57%`, momentum `-0.07%`, h1 `+1.75%`, Sobolev s012 `+2.48%`, and vorticity `+1.62%`; the evaluated compressed model remains close to the origin model.
 
 ### `poseidon_safe_default_r0.2`
 

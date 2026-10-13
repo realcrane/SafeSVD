@@ -35,3 +35,7 @@ multiple_physics_pretraining/
 !evaluation/
 !evaluation/poseidon/
 !evaluation/poseidon/**
+
+# Poseidon collectors are our source code, not an upstream checkout.
+!safe_svd/helper/collector/poseidon/
+!safe_svd/helper/collector/poseidon/**
