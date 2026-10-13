@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 from typing import Any
 
 import torch
@@ -11,6 +12,99 @@ from torch import Tensor, nn
 
 
 CapturedPairs = Iterable[tuple[str, Tensor, Tensor]]
+
+
+@dataclass(frozen=True)
+class CalibrationBatch:
+    category: str
+    payload: Any
+
+
+class CovarianceAccumulator:
+    """Shared per-layer/category matrix sums and flattened-vector counts."""
+
+    def __init__(self, device, accumulation_dtype):
+        self.device = torch.device(device)
+        self.dtype = accumulation_dtype
+        self.sums: dict[str, dict[str, Tensor]] = {}
+        self.counts: dict[str, dict[str, int]] = {}
+
+    def add(self, name, category, values, features, product_dtype=None):
+        rows = feature_rows(values.detach(), features).to(self.device)
+        if not rows.shape[0]:
+            return
+        if product_dtype is not None:
+            rows = rows.to(product_dtype)
+        gram = rows.T @ rows
+        if self.dtype is not None:
+            gram = gram.to(self.dtype)
+        if not torch.isfinite(gram).all():
+            raise ValueError(f"Non-finite statistics for {name}")
+        sums = self.sums.setdefault(name, {})
+        counts = self.counts.setdefault(name, {})
+        if category in sums:
+            sums[category].add_(gram)
+        else:
+            sums[category] = gram
+        counts[category] = counts.get(category, 0) + rows.shape[0]
+
+    def sample_count(self, name):
+        return sum(self.counts.get(name, {}).values())
+
+    def covariance(self, name, *, aggregation, trace_balance, trace_groups=None):
+        return merge_covariances(self.sums[name], self.counts[name], aggregation=aggregation,
+                                 trace_balance=trace_balance, trace_groups=trace_groups)
+
+
+def merge_covariances(sums, counts, *, aggregation="sample_mean", trace_balance=False, trace_groups=None):
+    """Category means / global sample mean, optionally balancing within groups."""
+    if aggregation not in {"sample_mean", "category_mean"}:
+        raise ValueError("aggregation must be sample_mean or category_mean")
+    categories = [name for name in sums if counts.get(name, 0) > 0]
+    if not categories:
+        raise ValueError("No samples were collected")
+    if not trace_balance and aggregation == "sample_mean":
+        return sum(sums[name].double() for name in categories) / sum(counts[name] for name in categories)
+    means = {name: (sums[name] / counts[name]).double() for name in categories}
+    if trace_balance:
+        groups = {}
+        for name in categories:
+            groups.setdefault((trace_groups or {}).get(name, "all"), []).append(name)
+        for members in groups.values():
+            traces = {name: means[name].trace().item() for name in members}
+            target = max(traces.values())
+            for name in members:
+                if traces[name] > 1e-15:
+                    means[name] = means[name] * (target / traces[name])
+    return sum(means.values()) / len(categories)
+
+
+@contextmanager
+def collection_state(model, *, training, disable_inplace=False):
+    """Restore per-module modes and inplace flags even when collection fails."""
+    modes = [(module, module.training) for module in model.modules()]
+    inplace = [(module, module.inplace) for module in model.modules() if hasattr(module, "inplace")]
+    try:
+        model.train(training)
+        if disable_inplace:
+            for module, _value in inplace:
+                module.inplace = False
+        yield
+    finally:
+        for module, mode in modes:
+            module.training = mode
+        for module, value in inplace:
+            module.inplace = value
+
+
+@contextmanager
+def trainer_model(trainer, model):
+    old_model = trainer.model
+    try:
+        trainer.model = model
+        yield
+    finally:
+        trainer.model = old_model
 
 
 @dataclass

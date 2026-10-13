@@ -6,6 +6,33 @@ import torch
 from torch import Tensor
 
 
+def fisher_whitener(covariance: Tensor, *, care_identity: bool = False):
+    """Return L, L^{-1} with L.T @ L equal to regularized gradient covariance.
+
+    Copied from the original Fisher Cholesky/eigen routine, including its
+    float32 factor and inverse convention. covariance is already a mean.
+    """
+    fisher = covariance.double()
+    identity = torch.eye(fisher.shape[0], device=fisher.device, dtype=fisher.dtype)
+    scale = fisher.diagonal().mean().item()
+    if care_identity:
+        regularized = fisher * (1.0 / scale if scale > 0 else 1.0) + identity
+    else:
+        jitter = max(scale * 0.01, 1e-18) if scale > 0 else 1e-9
+        regularized = fisher + jitter * identity
+    try:
+        factor = torch.linalg.cholesky(regularized)
+    except RuntimeError:
+        values, vectors = torch.linalg.eigh(regularized)
+        factor = vectors * values.clamp_min(1e-18).sqrt().unsqueeze(0)
+    left = factor.float().T
+    try:
+        inverse = torch.linalg.inv(left)
+    except RuntimeError:
+        inverse = torch.linalg.pinv(left)
+    return left, inverse
+
+
 def right_whitener(
     covariance: Tensor,
     *,
