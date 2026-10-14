@@ -57,7 +57,7 @@ def main(
     max_calib_batches=None,
     train_seed=None,
     fisher_batch_size=8,
-    capture_batch_size=8,
+    capture_batch_size=64,
     use_trace_balance=None,
     whitening_mode=None,
     eps_whiten=1e-6,
