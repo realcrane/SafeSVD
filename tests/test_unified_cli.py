@@ -48,7 +48,16 @@ class UnifiedCLITests(unittest.TestCase):
         self.assertIsNone(poseidon.calibration_seed)
         self.assertEqual((poseidon.rank_ratio, poseidon.traj_num, poseidon.final_time), (0.2, 64, 20))
         self.assertEqual(poseidon.rank_selector, "safe")
+        self.assertEqual((poseidon.whitening_mode, poseidon.eps_whiten_mode, poseidon.eps_whiten),
+                         ("new", "sum_equivalent", 1e-6))
+        self.assertEqual((mpp.whitening_mode, mpp.eps_whiten_mode), ("new", "absolute"))
         self.assertEqual(poseidon.ckpt_path, Path("weights"))
+
+    def test_poseidon_derivative_only_cache_has_a_distinct_path(self):
+        args = self.entry.resolve_cli_paths(self.entry.parse_args(["--model", "poseidon"]))
+        self.assertIn("_derivonly_", str(args.fisher_cache))
+        self.assertIn("_derivonly_", str(args.rank_cache))
+        self.assertIn("new_epssum_equivalent1e-06", str(args.profile_cache))
 
     def test_cli_dry_run_and_help_without_assets(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -105,6 +114,15 @@ class UnifiedCLITests(unittest.TestCase):
                 args = self.entry.resolve_cli_paths(self.entry.parse_args(["--model", "poseidon", "--DEV", "cpu"]))
                 with self.assertRaisesRegex(ValueError, "inside this repository"):
                     self.entry.load_model_and_data(args)
+
+    def test_poseidon_fisher_batch_size_is_part_of_cache_identity(self):
+        first = self.entry.resolve_cli_paths(self.entry.parse_args([
+            "--model", "poseidon", "--fisher_batch_size", "8"]))
+        second = self.entry.resolve_cli_paths(self.entry.parse_args([
+            "--model", "poseidon", "--fisher_batch_size", "16"]))
+        self.assertEqual(first.profile_cache, second.profile_cache)
+        self.assertNotEqual(first.fisher_cache, second.fisher_cache)
+        self.assertNotEqual(first.rank_cache, second.rank_cache)
 
     def test_poseidon_requires_official_source_and_rollout(self):
         from safe_svd.helper.collector.poseidon.input_collector import run_rollout
@@ -250,6 +268,13 @@ class UnifiedCLITests(unittest.TestCase):
                 rows = list(csv.DictReader(file))
             self.assertEqual([row["stage"] for row in rows], ["input_collection", "fisher_collection", "rank_selection", "compression"])
             self.assertTrue((root / "out/compressed_model.pt").is_file())
+            import json
+            manifest = json.loads((root / "out/run_config.json").read_text())
+            self.assertEqual(manifest["parameters"]["fisher_batch_size"], 2)
+            self.assertEqual(manifest["parameters"]["whitening_mode"], "new")
+            self.assertEqual(manifest["parameters"]["rank_selector"], "safe")
+            self.assertEqual(manifest["completed_stage"], "all")
+            self.assertEqual(len(manifest["rank_cache_sha256"]), 64)
 
     def test_poseidon_scaled_rank_matches_original_selector(self):
         from safe_svd.rank import allocate_ranks

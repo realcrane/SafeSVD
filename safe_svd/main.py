@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import inspect
 import json
 import sys
@@ -61,7 +62,7 @@ def main(
     use_trace_balance=None,
     whitening_mode=None,
     eps_whiten=1e-6,
-    eps_whiten_mode="absolute",
+    eps_whiten_mode=None,
     input_accumulation_dtype=None,
     compute_dtype=torch.float64,
     offload_cache=True,
@@ -108,10 +109,13 @@ def main(
     if use_trace_balance not in {True, False, "y", "n"}:
         raise ValueError("use_trace_balance must be y/n or bool")
     trace_balance = use_trace_balance == "y" if isinstance(use_trace_balance, str) else use_trace_balance
-    whitening_mode = whitening_mode or ("origin" if model_type == "poseidon" else "new")
+    whitening_mode = whitening_mode or "new"
     if whitening_mode not in {"origin", "new"}:
         raise ValueError("whitening_mode must be origin or new")
     whitening = "fisher_cholesky" if whitening_mode == "origin" else "spectral"
+    eps_whiten_mode = eps_whiten_mode or (
+        "sum_equivalent" if model_type == "poseidon" and whitening_mode == "new" else "absolute"
+    )
     aggregation = "category_mean" if model_type == "vicon" else "sample_mean"
     gradient_loss = gradient_loss or ("mse" if model_type == "poseidon" else "l1")
     dev = torch.device(device)
@@ -361,12 +365,12 @@ def parse_args(argv=None):
     parser.add_argument("--compress_mode", choices=("comb", "clean_input"), default="comb",
                         help="Sequential teacher/student capture or original-input-only SVD (default: comb)")
     parser.add_argument("--whitening_mode", choices=("origin", "new"),
-                        help="Cholesky-relative-jitter or spectral whitening (Poseidon: origin; others: new)")
+                        help="Cholesky-relative-jitter or spectral whitening (default: new)")
     parser.add_argument("--whitening_eps", "--eps_whiten", dest="eps_whiten", type=float, default=1e-6,
                         help="Positive regularizer for new spectral whitening (default: 1e-6)")
     parser.add_argument("--whitening_eps_mode", "--eps_whiten_mode", dest="eps_whiten_mode",
-                        choices=("absolute", "relative", "sum_equivalent"), default="absolute",
-                        help="Use eps, eps*mean(diagonal), or eps/feature-row-count (default: absolute)")
+                        choices=("absolute", "relative", "sum_equivalent"),
+                        help="Regularizer scale (Poseidon new: sum_equivalent; others: absolute)")
     parser.add_argument("--calibration_seed", default=None, metavar="default|SEED",
                         help="Sampling seed; Poseidon default selects fixed prefix, integer selects random trajectories")
     parser.add_argument("--batch_size", type=int, help="MPP YAML batch override; VICON default 128; Poseidon inference default 256")
@@ -416,7 +420,11 @@ def parse_args(argv=None):
     if args.calibration_num is None:
         args.calibration_num = 2048 if args.model_type == "vicon" else 16
     if args.whitening_mode is None:
-        args.whitening_mode = "origin" if args.model_type == "poseidon" else "new"
+        args.whitening_mode = "new"
+    if args.eps_whiten_mode is None:
+        args.eps_whiten_mode = (
+            "sum_equivalent" if args.model_type == "poseidon" and args.whitening_mode == "new" else "absolute"
+        )
     if args.use_trace_balance is None:
         args.use_trace_balance = "n" if args.model_type == "poseidon" else "y"
     if args.calibration_seed is None:
@@ -496,7 +504,9 @@ def resolve_cli_paths(args):
         input_tag += f"_bs{args.batch_size}"
     fisher_tag = f"{input_tag}_{args.gradient_loss}_br{args.balance_ratio}_decay{args.decay_alpha}"
     if args.model_type == "poseidon":
-        fisher_tag += f"_order{args.order_control}"
+        fisher_tag += f"_order{args.order_control}_derivonly"
+        if args.use_fisher == "y":
+            fisher_tag += f"_fbs{args.fisher_batch_size}"
     checkpoint_tag = args.model_name if args.model_type == "poseidon" else args.ckpt_path.stem
     args.cache_dir = args.cache_dir.expanduser().resolve() if args.cache_dir else PROJECT_ROOT / "artifacts/cache" / dataset_tag / checkpoint_tag
     args.profile_cache = args.profile_cache.expanduser().resolve() if args.profile_cache else args.cache_dir / "input" / input_tag / "profiling_mat.pt"
@@ -683,7 +693,26 @@ def cli_main(argv=None):
     print(f"Output: {args.save_path}")
     if args.dry_run:
         return 0
+    filename = "compressed_model.pth" if args.model_type == "vicon" else "compressed_model.pt"
+    if args.pipeline_stage != "rank_selection" and (args.save_path / filename).is_file() and not args.overwrite_cache:
+        raise FileExistsError(f"Model already exists: {args.save_path / filename}; choose a new save_path")
     model, calibration_data, params, trainer, rollout_fn = load_model_and_data(args)
+    # Record resolved settings before the expensive stages, including failures.
+    # This does not overwrite or invalidate any existing calibration cache.
+    args.save_path.mkdir(parents=True, exist_ok=True)
+    run_config_path = args.save_path / "run_config.json"
+    config_file = args.ckpt_path / "config.json"
+    run_config = {
+        "argv": list(sys.argv[1:] if argv is None else argv),
+        "parameters": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
+        "torch_version": str(torch.__version__),
+        "checkpoint_config_sha256": hashlib.sha256(config_file.read_bytes()).hexdigest() if config_file.is_file() else None,
+        "cache_exists_before_run": {name: getattr(args, name).is_file() for name in ("profile_cache", "fisher_cache", "rank_cache")},
+        "compression_dtype": "float32" if args.compression_backend == "low-gpu" else "float64",
+        "poseidon_factor_dtype": "float32" if args.model_type == "poseidon" else None,
+        "capture_cache_device": "cpu",
+    }
+    run_config_path.write_text(json.dumps(run_config, indent=2) + "\n")
     main(
         model, calibration_data,
         model_type=args.model_type,
@@ -721,6 +750,10 @@ def cli_main(argv=None):
         pipeline_stage=args.pipeline_stage,
         perf_csv_path=args.save_path / "gpu_profile.csv" if args.gpu_profile else None,
     )
+    if args.rank_cache.is_file():
+        run_config["rank_cache_sha256"] = hashlib.sha256(args.rank_cache.read_bytes()).hexdigest()
+    run_config["completed_stage"] = args.pipeline_stage
+    run_config_path.write_text(json.dumps(run_config, indent=2) + "\n")
     return 0
 
 

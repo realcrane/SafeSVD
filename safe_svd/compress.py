@@ -31,12 +31,18 @@ def replace_linear(
     rank: int,
     left_inverse: Tensor,
     right_inverse_transpose: Tensor,
+    factor_dtype: torch.dtype | None = None,
 ) -> None:
     """Shared SVD, inverse transforms, bias preservation, and replacement."""
     u, singular_values, vh = torch.linalg.svd(matrix, full_matrices=False)
     root = singular_values[:rank].sqrt()
-    left_weight = left_inverse @ (u[:, :rank] * root.unsqueeze(0))
-    right_weight = (root.unsqueeze(1) * vh[:rank]) @ right_inverse_transpose.T
+    left_factor = u[:, :rank] * root.unsqueeze(0)
+    right_factor = root.unsqueeze(1) * vh[:rank]
+    if factor_dtype is not None:
+        # Poseidon reference casts truncated factors before dewhitening.
+        left_factor, right_factor = left_factor.to(factor_dtype), right_factor.to(factor_dtype)
+    left_weight = left_inverse.to(left_factor.dtype) @ left_factor
+    right_weight = right_factor @ right_inverse_transpose.T.to(right_factor.dtype)
     replacement = nn.Sequential(
         nn.Linear(original.in_features, rank, bias=False),
         nn.Linear(rank, original.out_features, bias=original.bias is not None),
@@ -66,7 +72,7 @@ def compress(
     trace_balance: bool = False,
     whitening: str = "spectral",
     eps: float = 1e-6,
-    eps_mode: str = "absolute",
+    eps_mode: str | None = None,
     compute_dtype: torch.dtype = torch.float64,
     capture_fn: CaptureFunction | None = None,
     route_options: Mapping[str, Any] | None = None,
@@ -95,6 +101,7 @@ def compress(
         raise ValueError("Invalid aggregation")
     if whitening not in {"spectral", "fisher_cholesky"}:
         raise ValueError("Invalid whitening method")
+    eps_mode = eps_mode or ("sum_equivalent" if model_type == "poseidon" and whitening == "spectral" else "absolute")
     if eps_mode not in {"absolute", "relative", "sum_equivalent"} or not math.isfinite(eps) or eps <= 0:
         raise ValueError("Invalid epsilon configuration")
     if compute_dtype not in {torch.float32, torch.float64} or checkpoint_every < 1:
@@ -150,16 +157,23 @@ def compress(
                     right = right.to(device=target, dtype=compute_dtype)
                     right_inverse_transpose = right_inverse_transpose.to(device=target, dtype=compute_dtype)
                 else:
+                    # MySVD_fast decomposes raw Gram sums with absolute eps.
+                    # Keep their scale through SVD and float32 factor casting.
+                    raw_sums = (model_type == "poseidon" and whitening == "spectral"
+                                and eps_mode == "sum_equivalent"
+                                and aggregation == "sample_mean" and not trace_balance)
                     hh, hhp, hphp, count = collect_statistics(
                         collector(context, name), original.in_features,
                         device=target, dtype=compute_dtype,
                         aggregation=aggregation, trace_balance=trace_balance,
+                        normalize=not raw_sums,
                     )
                     right_metric = hphp.mul_(alpha).add_(hh, alpha=1 - alpha)
                     del hphp
                     right, right_inverse_transpose = right_whitener(
                         right_metric,
-                        method=whitening, eps=eps, eps_mode=eps_mode, sample_count=count,
+                        method=whitening, eps=eps,
+                        eps_mode="absolute" if raw_sums else eps_mode, sample_count=count,
                     )
                     del right_metric, right
                     cross = hh.mul_(1 - alpha).add_(hhp, alpha=alpha)
@@ -180,7 +194,8 @@ def compress(
                 else:
                     del right
                 del weight, left
-                replace_linear(student, name, original, matrix, rank, left_inverse, right_inverse_transpose)
+                replace_linear(student, name, original, matrix, rank, left_inverse, right_inverse_transpose,
+                               factor_dtype=torch.float32 if model_type == "poseidon" else None)
                 context.cache.pop(name, None)
                 del left_inverse, right_inverse_transpose, matrix
             done.add(name)

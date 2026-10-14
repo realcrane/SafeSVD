@@ -23,18 +23,18 @@
 | `--fisher_loss` / `--gradient_loss` | `l1` | 物理/Sobolev 项的误差函数：`l1`、`mse`、`smooth_l1`。MPP 只支持前两项。它不替换基础模型损失：MPP 使用相对 MSE，VICON 使用 masked MSE，Poseidon 使用模型返回的 `outputs.loss`。 |
 | `--balance_ratio` | `10.0` | 物理项强度。MPP/Poseidon 对每阶项使用 `min(base_loss / physical_loss × balance_ratio, 1000)` 的动态归一化系数；VICON 直接用 `base_loss + balance_ratio × derivative_loss`。`0` 可去掉物理项，通常使用非负值。 |
 | `--decay_alpha` | `1.0` | MPP/Poseidon 对第 k 阶空间导数项乘 `decay_alpha ** (k-1)`。`1` 不衰减；小于 1 降低高阶项权重。当前 VICON 路由不使用它。 |
-| `--order_control` | `2` | **Poseidon** 最大空间差分阶数，非负整数。`0` 仍有反归一化后的零阶物理误差，不能用它完全关闭物理项。MPP/VICON 根据数据类别确定阶数，不使用此 CLI 值：MPP incompNS/diffre2d 为 2、compNS/swe 为 1；VICON NS2D 为 2、COMPRESSIBLE2D/EULER2D 为 1。 |
+| `--order_control` | `2` | **Poseidon** 最大空间差分阶数，非负整数。与 MySVD_fast 一致，只附加一阶及以上空间差分损失；`0` 只保留模型 base loss。MPP/VICON 根据数据类别确定阶数，不使用此 CLI 值：MPP incompNS/diffre2d 为 2、compNS/swe 为 1；VICON NS2D 为 2、COMPRESSIBLE2D/EULER2D 为 1。 |
 
-当前 Poseidon Fisher 没有传入 `prev_pred/prev_labels`，因此只计算零阶和空间差分物理项，不额外计算时间差分损失。
+当前 Poseidon Fisher 没有传入 `prev_pred/prev_labels`，因此只附加空间差分物理项，不额外计算时间差分损失。
 `use_fisher=n` 时，上述 Fisher 损失参数都不参与计算。
 
 ## 3. Whitening
 
 | CLI 参数 | 默认值 | 定义和影响 |
 | --- | --- | --- |
-| `--whitening_mode` | MPP/VICON `new`；Poseidon `origin` | `origin` 使用 Cholesky 和固定相对 jitter，失败时用特征分解；`new` 使用谱分解和显式 epsilon。影响输入度量和 compression 的右度量。Fisher 左度量始终使用独立的 Cholesky/eigen 例程。Poseidon 的 `new` rank selection 还将每层奇异值能量乘以输入特征行数，以保持原求和统计的相对尺度。 |
+| `--whitening_mode` | `new` | `origin` 使用 Cholesky 和固定相对 jitter，失败时用特征分解；`new` 使用谱分解和显式 epsilon。影响输入度量和 compression 的右度量。Poseidon 默认与 MySVD_fast 的谱白化对齐；显式 origin 是另一种配置。Fisher 左度量始终使用独立的 Cholesky/eigen 例程。Poseidon 的 `new` rank selection 还将每层奇异值能量乘以输入特征行数，以保持原求和统计的相对尺度。 |
 | `--whitening_eps` / `--eps_whiten` | `1e-6` | `new` 中特征值的正则量，必须为正。**对 `origin` 和 Fisher 左度量不生效**；它们使用约 `0.01 × mean(diagonal)` 的 jitter，零尺度时使用固定下限。 |
-| `--whitening_eps_mode` / `--eps_whiten_mode` | `absolute` | `absolute` 使用 eps；`relative` 使用 `eps × mean(diagonal)`，尺度有数值下限；`sum_equivalent` 使用 `eps / N`，N 是该层展开后的输入特征行数，以模拟对求和协方差加 eps。只对 `new` 生效。 |
+| `--whitening_eps_mode` / `--eps_whiten_mode` | Poseidon new：`sum_equivalent`；其他：`absolute` | `absolute` 使用 eps；`relative` 使用 `eps × mean(diagonal)`，尺度有数值下限；`sum_equivalent` 在均值统计上使用 `eps / N`，N 是该层展开后的输入特征行数。Poseidon comb 在默认 sample_mean/no-trace 配置下直接累加原始 Gram 求和，并加绝对 eps，以保持 MySVD_fast 的 SVD 和截断因子数值尺度。只对 `new` 生效。 |
 
 ## 4. 采样、batch 和显存
 
@@ -91,7 +91,13 @@ low-gpu 会改变 compression 的数值精度，并增加 CPU 内存与传输开
 | `--help` | — | 显示 CLI 选项定义。 |
 
 改变 batch_size 会改变默认缓存路径中的 bs 标签。若压缩 OOM 后仅降低前向批大小，想复用已经完成的 Input/Fisher/Rank，必须显式指定原来的三个缓存文件。
-缓存路径没有完整 checkpoint/配置内容哈希；调用者必须保证复用的是同一模型、数据和采样设置的兼容缓存。Fisher batch 大小变化会影响 loss 的梯度尺度，因此重新采集时应使用新的缓存路径或 overwrite_cache。
+Poseidon 自动生成的 Fisher/rank 缓存路径包含 `_fbs8` 等 Fisher batch 标签，避免调整批大小后误读另一批大小生成的结果；这会使历史默认路径不再自动命中。历史缓存保留原文件，确认兼容后可以显式指定。
+Poseidon Fisher/rank 路径还包含 `_derivonly`，隔离旧零阶损失产生的缓存。旧入口生成的 Fisher 和由其生成的 rank 应重新计算；显式指定缓存路径时不会检查其损失定义。
+缓存路径没有完整 checkpoint/配置内容哈希；调用者必须保证复用的是同一模型、数据和采样设置的兼容缓存。
+
+CLI 在输出目录保存 `run_config.json`，记录完整命令参数、解析后的路径、缓存在运行前是否存在、Torch 版本及 checkpoint config 的 SHA-256；成功后补充 rank JSON 的 SHA-256。config 哈希不能证明权重文件相同，缓存存在记录也不能证明缓存生成时的参数；这些信息不能替代一致性检查。
+
+Poseidon reconstruction 还遵循参考实现的 float32 精度策略：`origin` 的 Cholesky 因子/逆先以 float32 构造，随后转换成 compute_dtype；SVD 截断后的因子在逆变换前转为 float32。GPU 模式的协方差和 SVD 仍使用 float64。
 
 ## 7. Python main() 接口
 
@@ -118,10 +124,10 @@ low-gpu 会改变 compression 的数值精度，并增加 CPU 内存与传输开
 | `batches_per_dset` | `16` | MPP 每文件的 batch 上限，可为正数或 None（全部）；CLI 设置为 calibration_num/params.batch_size。 |
 | `max_calib_batches` | `None` | VICON 每类别 batch 上限；CLI 设置为 floor(calibration_num/batch_size)。当前 main 的 Poseidon route 不传此限制。 |
 | `train_seed` | `None` | VICON Input Profiling 前恢复原训练随机种子；CLI 使用 cfg.train_seed。 |
-| `fisher_batch_size`、`capture_batch_size` | `16`、`64` | 同 CLI。若传已有 Poseidon DataLoader，Fisher 保留其 batch 设置而不是重新构造。 |
+| `fisher_batch_size`、`capture_batch_size` | `8`、`64` | Python main 的 Fisher 默认 8，CLI 默认 16。若传已有 Poseidon DataLoader，Fisher 保留其 batch 设置而不是重新构造。 |
 | `use_trace_balance` | `None` | 自动取 MPP/VICON True、Poseidon False；支持 y/n 或 bool。 |
-| `whitening_mode` | `None` | 自动取 MPP/VICON new、Poseidon origin。 |
-| `eps_whiten`、`eps_whiten_mode` | `1e-6`、`absolute` | 对应 whitening_eps、whitening_eps_mode。 |
+| `whitening_mode` | `None` | 自动取 new。 |
+| `eps_whiten`、`eps_whiten_mode` | `1e-6`、`None` | Poseidon new 自动取 sum_equivalent；其他自动取 absolute。对应 whitening_eps、whitening_eps_mode。 |
 | `input_accumulation_dtype` | `None` | 仅 Input 统计累积 dtype：MPP/VICON 默认 float64，Poseidon 默认 float32；输入 Gram 乘积仍默认 float32。 |
 | `compute_dtype` | `torch.float64` | 仅 compression 的统计/矩阵/SVD dtype，可设 float32。不修改 rank selection 的 float64。CLI low-gpu 设为 float32。 |
 | `offload_cache` | `True` | Poseidon capture 参数与复用缓存默认放 CPU；模型仍在 device。CLI 的 GPU 和 low-gpu 都为 True，缓存位置不再与统计精度绑定。Python API 可以显式 False 使用设备缓存，但显存会随校准样本数量累计。 |

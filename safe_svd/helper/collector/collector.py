@@ -197,8 +197,11 @@ def collect_statistics(
     dtype: torch.dtype,
     aggregation: str,
     trace_balance: bool,
+    normalize: bool = True,
 ) -> tuple[Tensor, Tensor, Tensor, int]:
-    """Return mean HH, H.T @ Hp, Hp.T @ Hp, and captured feature-row count.
+    """Return HH, H.T @ Hp, Hp.T @ Hp, and captured feature-row count.
+
+    Default to means; normalize=False returns raw sums for MySVD_fast.
 
     Pairs must describe the same ordered examples/tokens. Routes must restore
     hooks/trainer state in finally blocks and use repeatable calibration data.
@@ -229,7 +232,11 @@ def collect_statistics(
     if not buckets:
         raise ValueError("No paired calibration inputs were captured")
     count = sum(entry[3] for entry in buckets.values())
-    if aggregation == "sample_mean" and not trace_balance:
+    if not normalize:
+        if aggregation != "sample_mean" or trace_balance:
+            raise ValueError("Raw sums require sample_mean without trace balancing")
+        merged = [sum(entry[i] for entry in buckets.values()) for i in range(3)]
+    elif aggregation == "sample_mean" and not trace_balance:
         merged = [sum(entry[i] for entry in buckets.values()) / count for i in range(3)]
     else:
         means = [tuple(entry[i] / entry[3] for i in range(3)) for entry in buckets.values()]

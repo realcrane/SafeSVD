@@ -288,7 +288,7 @@ class UnifiedProfilingTests(unittest.TestCase):
                 with self.subTest(route=route, whitening=whitening):
                     model, data, options, _ = make_case(route)
                     actual, counts = collect_inputs(model, data, model_type=route, device="cpu",
-                                                    route_options=options, whitening=whitening)
+                                                    route_options=options, whitening=whitening, eps_mode="absolute")
                     namespace = {"torch": torch, "nn": nn, "tqdm": lambda values, **kwargs: values,
                                  "DataLoader": torch.utils.data.DataLoader}
                     if route == "mpp":
@@ -352,7 +352,7 @@ class UnifiedProfilingTests(unittest.TestCase):
                 else:
                     namespace.update(sobolev_loss_calc_denorm=sobolev_loss_calc_denorm,
                                      fisher_cholesky_whitener=poseidon_whitener)
-                    original = source_function(root / "poseidon/SAFE_SVD/helper/fisher_collector.py", "collect_fisher_dict_linear_only", namespace)
+                    original = source_function(root / "poseidon/MySVD_fast/helper/fisher_collector.py", "collect_fisher_dict_linear_only", namespace)
                     reference = original(options["trainer"], "wave", torch.utils.data.DataLoader(data, batch_size=2),
                                          torch.device("cpu"), order_control=1, constants=data.constants, transpose=True)
                 self.assertEqual(set(actual), set(reference))

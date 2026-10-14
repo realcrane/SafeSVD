@@ -19,7 +19,7 @@ from ..whitener import right_whitener, fisher_whitener
 @torch.no_grad()
 def collect_inputs(
     model, calibration_data, *, model_type, device="cuda", route_options=None,
-    whitening=None, eps=1e-6, eps_mode="absolute", aggregation=None,
+    whitening=None, eps=1e-6, eps_mode=None, aggregation=None,
     trace_balance=None, accumulation_dtype=None, product_dtype=torch.float32,
     return_sample_counts=True, return_statistics=False, missing="identity",
 ):
@@ -27,14 +27,15 @@ def collect_inputs(
 
     Route options: MPP params/seed/batches_per_dset; VICON trainer and
     max_calib_batches and train_seed (or cfg.train_seed); Poseidon trainer and optional rollout_fn. Default
-    whitening is spectral for MPP/VICON and fisher_cholesky for Poseidon.
+    whitening is spectral; Poseidon defaults to sum-equivalent regularization.
     return_statistics returns (metrics, counts, mean_covariances).
     """
     options = dict(route_options or {})
     validate_route(model_type, options)
     aggregation = aggregation or ("category_mean" if model_type == "vicon" else "sample_mean")
     trace_balance = model_type != "poseidon" if trace_balance is None else trace_balance
-    whitening = whitening or ("fisher_cholesky" if model_type == "poseidon" else "spectral")
+    whitening = whitening or "spectral"
+    eps_mode = eps_mode or ("sum_equivalent" if model_type == "poseidon" and whitening == "spectral" else "absolute")
     accumulation_dtype = accumulation_dtype or (torch.float32 if model_type == "poseidon" else torch.float64)
     if aggregation not in {"sample_mean", "category_mean"} or missing not in {"identity", "raise"}:
         raise ValueError("Invalid aggregation or missing-layer policy")

@@ -149,24 +149,27 @@ def _toy_rollout(trainer, dataset, model_path=""):
         trainer.prediction_step(trainer.model, inputs, False)
 
 
-def _load_source_helpers(root):
+def _load_source_helpers(root, package="SAFE_SVD"):
     modules = {}
-    for name in ("SAFE_SVD", "SAFE_SVD.helper", "SAFE_SVD.helper.whitener", "transformers", "transformers.utils",
-                 "poseidon_main", "poseidon_main.scOT", "poseidon_main.scOT.inference"):
+    for name in (package, f"{package}.helper", f"{package}.helper.whitener", "transformers", "transformers.utils",
+                 "poseidon_main", "poseidon_main.scOT", "poseidon_main.scOT.inference",
+                 "poseidon_main.scOT.problems", "poseidon_main.scOT.problems.base"):
         modules[name] = types.ModuleType(name)
         modules[name].__path__ = []
     modules["transformers.utils"].logging = SimpleNamespace(
         get_verbosity=lambda: 20, set_verbosity_error=lambda: None, set_verbosity=lambda level: None,
     )
     modules["poseidon_main.scOT.inference"].rollout = _toy_rollout
+    modules["poseidon_main.scOT.inference"].get_trainer = None
+    modules["poseidon_main.scOT.problems.base"].get_dataset = None
     helpers = {}
     with patch.dict(sys.modules, modules):
         # Whitening is upstream of capture and unused here. Keeping its module
         # stubbed also permits collector tests on the local Python 3.9 runtime.
         for filename in ("input_collector", "mlp_module_collector",
                          "attention_module_collector", "patch_unmerging_collector"):
-            name = f"SAFE_SVD.helper.{filename}"
-            spec = importlib.util.spec_from_file_location(name, root / "SAFE_SVD" / "helper" / f"{filename}.py")
+            name = f"{package}.helper.{filename}"
+            spec = importlib.util.spec_from_file_location(name, root / package / "helper" / f"{filename}.py")
             module = importlib.util.module_from_spec(spec)
             sys.modules[name] = module
             spec.loader.exec_module(module)

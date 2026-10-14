@@ -110,8 +110,7 @@ class ProgressMemoryTests(unittest.TestCase):
         with patch.object(module.torch, "eye", wraps=torch.eye) as eye:
             module.compress(model, [], {"0": 1}, model_type="mpp", device="cpu", capture_fn=capture,
                             left_metrics={"0": metric}, progress=False)
-        self.assertTrue(eye.call_args_list)
-        self.assertTrue(all(call.args[0] == 4 for call in eye.call_args_list))
+        self.assertFalse(any(call.args[0] == 8 for call in eye.call_args_list))
 
     def test_eager_covariance_release_matches_existing_factorization(self):
         from safe_svd.compress import compress

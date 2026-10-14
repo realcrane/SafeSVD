@@ -1,4 +1,4 @@
-"""Poseidon physical loss copied from SAFE_SVD/helper/fisher_collector.py."""
+"""Poseidon derivative loss aligned with MySVD_fast/helper/fisher_collector.py."""
 
 from __future__ import annotations
 
@@ -80,17 +80,8 @@ def sobolev_loss_calc_denorm(dataset_name, pred, labels, order_control, base_los
     # 初始化循环变量
     current_preds = [pred_uv]
     current_targets = [target_uv]
-    total_weighted_grad_loss = 0.0
-
-    # Order 0: 函数值本身的 loss (反归一化物理空间)
-    order0_loss = loss_func(pred_uv, target_uv)
-    order0_loss_val = order0_loss.item() if isinstance(order0_loss, torch.Tensor) else order0_loss
-    if order0_loss_val > 1e-20:
-        norm_weight_0 = (base_loss_val / order0_loss_val) * balance_ratio
-    else:
-        norm_weight_0 = 0.0
-    norm_weight_0 = min(norm_weight_0, 1000.0)
-    total_weighted_grad_loss += norm_weight_0 * order0_loss
+    # The caller retains the model's base loss; only add spatial derivatives.
+    total_weighted_grad_loss = pred_uv.new_zeros(())
 
     # 4. 循环计算导数
     for k in range(1, order_control + 1):
