@@ -85,7 +85,8 @@ low-gpu 会改变 compression 的数值精度，并增加 CPU 内存与传输开
 | `--cache_dir` | 本仓库 artifacts/cache/数据集或模型/模型标签 | 自动生成的 Input/Fisher 缓存根目录；显式 profile_cache/fisher_cache 优先。 |
 | `--rank_root` | 本仓库 artifacts/ranks/数据集或模型/模型标签 | 自动生成的 rank 缓存根目录；显式 rank_cache 优先。 |
 | `--save_path` | 本仓库 artifacts/compressed/数据集或模型/模型标签/比例/设置标签 | 输出目录。MPP/Poseidon 保存完整 nn.Module 到 compressed_model.pt；VICON 保存 state_dict 到 compressed_model.pth；三者都保存 rank_dict.json。 |
-| `--overwrite_cache` | 关闭 | 强制重新采集/分配缓存，并允许替换已有最终模型。compression-only 不允许此选项。默认遇到已有最终模型会报错，避免覆盖。 |
+| `--checkpoint_percent` | `0.1` | 压缩每处理 `max(int(Linear层总数 × 比例), 1)` 层保存一次 compressing_model.pt；比例范围 `(0,1]`，最后不足一个间隔也保存。815 层时默认每 81 层保存。 |
+| `--overwrite_cache` | 关闭 | 强制重新采集/分配缓存，忽略压缩断点，并允许替换已有最终模型。compression-only 不允许此选项。默认遇到已有最终模型会报错，避免覆盖。 |
 | `--gpu_profile` | 关闭 | 在 save_path/gpu_profile.csv 记录四阶段耗时与内存指标。 |
 | `--dry_run` | 关闭 | 打印解析后的配置和路径后退出，不加载模型、数据，也不创建缓存。不验证文件存在或 GPU 能否实际运行。 |
 | `--help` | — | 显示 CLI 选项定义。 |
@@ -96,6 +97,10 @@ Poseidon Fisher/rank 路径还包含 `_derivonly`，隔离旧零阶损失产生�
 缓存路径没有完整 checkpoint/配置内容哈希；调用者必须保证复用的是同一模型、数据和采样设置的兼容缓存。
 
 CLI 在输出目录保存 `run_config.json`，记录完整命令参数、解析后的路径、缓存在运行前是否存在、Torch 版本及 checkpoint config 的 SHA-256；成功后补充 rank JSON 的 SHA-256。config 哈希不能证明权重文件相同，缓存存在记录也不能证明缓存生成时的参数；这些信息不能替代一致性检查。
+
+压缩断点保存已完成层名、rank 和压缩设置，以及当前 student。MPP/Poseidon 使用完整模型；VICON 保存 state_dict，恢复时根据已完成层及 rank 重建低秩结构。恢复不保存激活缓存，后续层需要的输入会按当前 student 重新采集。模型权重、数据和采样必须与原运行一致；断点会检查已记录的设置与 rank，但不校验全部权重或数据文件内容。可降低 batch_size/capture_batch_size，改变压缩 dtype/alpha/whitening 等设置会报错。
+
+断点和最终模型均先写临时文件再替换正式文件；保存失败保留上一份完整断点。最终模型和 rank_dict.json 保存成功后删除 compressing_model.pt。Input/Fisher/Rank 仍按阶段缓存，不提供采集到一半的 batch 级恢复。
 
 Poseidon reconstruction 还遵循参考实现的 float32 精度策略：`origin` 的 Cholesky 因子/逆先以 float32 构造，随后转换成 compute_dtype；SVD 截断后的因子在逆变换前转为 float32。GPU 模式的协方差和 SVD 仍使用 float64。
 
@@ -133,6 +138,7 @@ Poseidon reconstruction 还遵循参考实现的 float32 精度策略：`origin`
 | `offload_cache` | `True` | Poseidon capture 参数与复用缓存默认放 CPU；模型仍在 device。CLI 的 GPU 和 low-gpu 都为 True，缓存位置不再与统计精度绑定。Python API 可以显式 False 使用设备缓存，但显存会随校准样本数量累计。 |
 | `fisher_loss_fn` | `None` | 自定义可微标量损失回调 `(model, CalibrationBatch) -> Tensor`，覆盖默认 Fisher 损失路由。无 CLI 选项。 |
 | `profile_cache`、`fisher_cache`、`rank_cache` | 均 `None` | 显式缓存文件；API 默认不读写缓存，CLI 自动生成路径。 |
+| `checkpoint_percent` | `0.1` | 与 CLI 相同的逐层保存与自动续跑。只有提供 save_path 时写断点；overwrite_cache=True 忽略旧断点。 |
 | `save_path` | `None` | API 默认只返回模型、不保存；CLI 默认生成输出目录。 |
 | `overwrite_cache` | `False` | 同 CLI。 |
 | `verbose` | `True` | 阶段/缓存日志及 Fisher、compression 的 tqdm 进度；False 关闭这两个进度条，Poseidon 官方 Input rollout 的进度由 Trainer 控制。 |
@@ -160,10 +166,10 @@ python -m safe_svd.main --model poseidon \
   --profile_cache /path/to/original/profiling_mat.pt \
   --fisher_cache /path/to/original/Ldict.pt \
   --rank_cache /path/to/original/rank_0.2.json \
-  --save_path ./artifacts/poseidon_retry
+  --save_path /path/to/original/output
 ```
 
-这些是示例值，必须替换为原运行的路径与采样/压缩参数。此方式跳过前三阶段，但从第一层重新开始 compression；没有自动逐层恢复已失败的压缩。
+这些是示例值，必须替换为原运行的路径与采样/压缩参数。此方式跳过前三阶段；save_path 应指向原运行的输出目录，存在 compressing_model.pt 时自动跳过已保存的层。没有断点时从第一层开始。恢复必须保持原 compression_backend；示例 low-gpu 只适用于原运行也采用 low-gpu 的情况。
 
 ## 10. 与 safesvd/ 的 Poseidon 采集配置对比
 

@@ -9,6 +9,7 @@ All CLI and Python API parameters are documented in safe_svd/PARAMETERS.md.
 from __future__ import annotations
 
 import argparse
+import copy
 import gc
 import hashlib
 import inspect
@@ -72,6 +73,7 @@ def main(
     rank_cache=None,
     save_path=None,
     overwrite_cache=False,
+    checkpoint_percent=0.1,
     verbose=True,
     pipeline_stage="all",
     perf_csv_path=None,
@@ -87,6 +89,9 @@ def main(
     and saved after their stage. overwrite_cache=True forces recomputation.
     Final saving follows the originals: MPP/Poseidon save a complete model;
     VICON saves its state_dict plus rank_dict.json for the low-rank topology.
+    With save_path, checkpoint every checkpoint_percent of Linear layers.
+    Resume automatically from compressing_model.pt unless overwrite_cache=True.
+    Completed profiling/Fisher/rank caches are reused.
     """
     # ===================================================================
     # 0. Configuration
@@ -97,6 +102,8 @@ def main(
         raise ValueError("model_type must be mpp, vicon, or poseidon")
     if not 0 < rank_ratio <= 1 or not 0 <= alpha <= 1:
         raise ValueError("Invalid rank_ratio or alpha")
+    if not 0 < checkpoint_percent <= 1:
+        raise ValueError("checkpoint_percent must be in (0,1]")
     if rank_selector not in {"safe", "legacy"}:
         raise ValueError("rank_selector must be safe or legacy")
     if compress_mode not in {"comb", "clean_input"}:
@@ -298,6 +305,81 @@ def main(
         model.cpu()
         gc.collect()
         torch.cuda.empty_cache()
+    checkpoint_path = save_path / "compressing_model.pt" if save_path is not None else None
+    initial_student, completed_layers = None, set()
+    total_layers = sum(isinstance(layer, nn.Linear) for layer in model.modules())
+    checkpoint_every = max(int(total_layers * checkpoint_percent), 1)
+    compression_config = {
+        "model_type": model_type, "dataset_name": dataset_name,
+        "alpha": alpha, "compress_mode": compress_mode,
+        "whitening": whitening, "eps": eps_whiten, "eps_mode": eps_whiten_mode,
+        "aggregation": aggregation, "trace_balance": trace_balance,
+        "compute_dtype": str(compute_dtype), "use_fisher": use_fisher,
+        "gradient_loss": gradient_loss, "balance_ratio": balance_ratio,
+        "decay_alpha": decay_alpha, "order_control": order_control,
+        "calibration_seed": calibration_seed, "batches_per_dset": batches_per_dset,
+        "max_calib_batches": max_calib_batches, "train_seed": train_seed,
+        "calibration_size": len(calibration_data) if hasattr(calibration_data, "__len__") else None,
+    }
+    if checkpoint_path is not None and checkpoint_path.is_file() and not overwrite_cache:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        if not isinstance(checkpoint, dict) or "compressed_layers" not in checkpoint:
+            raise ValueError(f"Invalid compression checkpoint: {checkpoint_path}")
+        if "rank_dict" in checkpoint and checkpoint["rank_dict"] != rank_dict:
+            raise ValueError("Checkpoint ranks differ from current ranks; use a new save_path or --overwrite_cache (Python: overwrite_cache=True)")
+        if "compression_config" in checkpoint and checkpoint["compression_config"] != compression_config:
+            changed = [key for key, value in compression_config.items()
+                       if checkpoint["compression_config"].get(key) != value]
+            raise ValueError(f"Checkpoint compression settings differ: {changed}; use a new save_path or --overwrite_cache (Python: overwrite_cache=True)")
+        completed_layers = set(checkpoint["compressed_layers"])
+        if "model" in checkpoint:
+            initial_student = checkpoint["model"]
+            if not isinstance(initial_student, nn.Module):
+                raise ValueError("Checkpoint model must be an nn.Module")
+        else:
+            # VICON stores weights and topology, as in its final output format.
+            initial_student = copy.deepcopy(model).cpu()
+            for name, original in model.named_modules():
+                if name not in completed_layers or not isinstance(original, nn.Linear):
+                    continue
+                rank = rank_dict.get(name)
+                if rank is None or rank == 0 or rank * (original.in_features + original.out_features) >= original.weight.numel():
+                    continue
+                replacement = nn.Sequential(
+                    nn.Linear(original.in_features, rank, bias=False),
+                    nn.Linear(rank, original.out_features, bias=original.bias is not None),
+                ).to(device="cpu", dtype=original.weight.dtype)
+                parent, _, attribute = name.rpartition(".")
+                setattr(initial_student.get_submodule(parent) if parent else initial_student, attribute, replacement)
+            initial_student.load_state_dict(checkpoint["model_state_dict"])
+        del checkpoint
+        if verbose:
+            print(f"==== Resuming from {checkpoint_path}: {len(completed_layers)}/{total_layers} layers completed ====", flush=True)
+
+    def save_compression_checkpoint(student, done):
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = checkpoint_path.with_name(checkpoint_path.name + ".tmp")
+        student_device = next(student.parameters()).device
+        try:
+            student.cpu()
+            checkpoint = {
+                "compressed_layers": sorted(done), "rank_dict": rank_dict,
+                "compression_config": compression_config,
+            }
+            if model_type == "vicon":
+                checkpoint["model_state_dict"] = student.state_dict()
+            else:
+                checkpoint["model"] = student
+            torch.save(checkpoint, temporary)
+            temporary.replace(checkpoint_path)
+        finally:
+            student.to(student_device)
+            temporary.unlink(missing_ok=True)
+        if verbose:
+            print(f"[Checkpoint] Saved {len(done)}/{total_layers} layers to {checkpoint_path}", flush=True)
+
+    if checkpoint_path is not None and verbose:
+        print(f"Checkpoint every {checkpoint_every} layers ({checkpoint_percent:.0%}): {checkpoint_path}", flush=True)
     with perf.stage("compression"):
         compressed_model = compress(
             model,
@@ -316,6 +398,10 @@ def main(
             aggregation=aggregation,
             trace_balance=trace_balance,
             compute_dtype=compute_dtype,
+            checkpoint_fn=save_compression_checkpoint if checkpoint_path is not None else None,
+            checkpoint_every=checkpoint_every,
+            initial_student=initial_student,
+            completed_layers=completed_layers,
             progress=verbose,
         )
 
@@ -324,11 +410,19 @@ def main(
     # ===================================================================
     if save_path is not None:
         save_path.mkdir(parents=True, exist_ok=True)
-        if model_type == "vicon":
-            torch.save(compressed_model.state_dict(), final_path)
-        else:
-            torch.save(compressed_model, final_path)
-        (save_path / "rank_dict.json").write_text(json.dumps(rank_dict, indent=2) + "\n")
+        # The final filename marks success, so never leave a partial final file.
+        temporary = final_path.with_name(final_path.name + ".tmp")
+        rank_output = save_path / "rank_dict.json"
+        rank_temporary = rank_output.with_name(rank_output.name + ".tmp")
+        try:
+            torch.save(compressed_model.state_dict() if model_type == "vicon" else compressed_model, temporary)
+            rank_temporary.write_text(json.dumps(rank_dict, indent=2) + "\n")
+            rank_temporary.replace(rank_output)
+            temporary.replace(final_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+            rank_temporary.unlink(missing_ok=True)
+        checkpoint_path.unlink(missing_ok=True)
         if verbose:
             print(f"Success! Saved to {final_path}")
     return compressed_model
@@ -384,7 +478,9 @@ def parse_args(argv=None):
     parser.add_argument("--cache_dir", type=Path, help="Root for generated input/Fisher caches")
     parser.add_argument("--rank_root", type=Path, help="Root for generated rank caches")
     parser.add_argument("--save_path", type=Path, help="Output directory for compressed model and rank_dict.json")
-    parser.add_argument("--overwrite_cache", action="store_true", help="Recompute stage caches and allow replacing final output")
+    parser.add_argument("--overwrite_cache", action="store_true", help="Recompute caches, ignore compression checkpoint and allow replacing final output")
+    parser.add_argument("--checkpoint_percent", type=float, default=0.1,
+                        help="Save compression checkpoint every fraction of Linear layers, in (0,1] (default: 0.1)")
     parser.add_argument("--dry_run", action="store_true", help="Print paths/configuration without importing model runtimes or loading assets")
 
     # MPP arguments, retaining the names in MySVD/mysvd.py.
@@ -442,6 +538,8 @@ def parse_args(argv=None):
         parser.error("calibration_seed must be non-negative")
     if not 0 < args.rank_ratio <= 1 or not 0 <= args.alpha <= 1:
         parser.error("rank_ratio must be in (0,1], alpha in [0,1]")
+    if not 0 < args.checkpoint_percent <= 1:
+        parser.error("checkpoint_percent must be in (0,1]")
     if args.calibration_num <= 0 or args.traj_num <= 0 or args.final_time <= 0:
         parser.error("Calibration sizes and final_time must be positive")
     if args.batch_size is not None and args.batch_size <= 0:
@@ -691,6 +789,7 @@ def cli_main(argv=None):
     print(f"Fisher cache: {args.fisher_cache}")
     print(f"Rank cache: {args.rank_cache}")
     print(f"Output: {args.save_path}")
+    print(f"Compression checkpoint: {args.save_path / 'compressing_model.pt'}; interval={args.checkpoint_percent:.0%}; resume={not args.overwrite_cache}")
     if args.dry_run:
         return 0
     filename = "compressed_model.pth" if args.model_type == "vicon" else "compressed_model.pt"
@@ -708,6 +807,7 @@ def cli_main(argv=None):
         "torch_version": str(torch.__version__),
         "checkpoint_config_sha256": hashlib.sha256(config_file.read_bytes()).hexdigest() if config_file.is_file() else None,
         "cache_exists_before_run": {name: getattr(args, name).is_file() for name in ("profile_cache", "fisher_cache", "rank_cache")},
+        "compression_checkpoint_exists_before_run": (args.save_path / "compressing_model.pt").is_file(),
         "compression_dtype": "float32" if args.compression_backend == "low-gpu" else "float64",
         "poseidon_factor_dtype": "float32" if args.model_type == "poseidon" else None,
         "capture_cache_device": "cpu",
@@ -747,6 +847,7 @@ def cli_main(argv=None):
         rank_cache=args.rank_cache,
         save_path=args.save_path,
         overwrite_cache=args.overwrite_cache,
+        checkpoint_percent=args.checkpoint_percent,
         pipeline_stage=args.pipeline_stage,
         perf_csv_path=args.save_path / "gpu_profile.csv" if args.gpu_profile else None,
     )
