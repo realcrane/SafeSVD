@@ -374,8 +374,8 @@ def parse_args(argv=None):
     parser.add_argument("--calibration_seed", default=None, metavar="default|SEED",
                         help="Sampling seed; Poseidon default selects fixed prefix, integer selects random trajectories")
     parser.add_argument("--batch_size", type=int, help="MPP YAML batch override; VICON default 128; Poseidon inference default 256")
-    parser.add_argument("--fisher_batch_size", type=int, default=16, help="Poseidon backward batch size (default: 16)")
-    parser.add_argument("--capture_batch_size", type=int, default=64, help="Poseidon compression capture slice size in examples, not trajectories (default: 64)")
+    parser.add_argument("--fisher_batch_size", type=int, default=8, help="Poseidon backward batch size (default: 16)")
+    parser.add_argument("--capture_batch_size", type=int, default=8, help="Poseidon compression capture slice size in examples, not trajectories (default: 64)")
     parser.add_argument("--pipeline_stage", choices=("all", "rank_selection", "compression"), default="all",
                         help="All stages, stop after ranks, or compress with existing caches (default: all)")
     parser.add_argument("--profile_cache", type=Path, help="Input whitening factors and sample-count cache (.pt)")
