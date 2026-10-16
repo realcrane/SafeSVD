@@ -66,7 +66,7 @@ low-gpu 会改变 compression 的数值精度，并增加 CPU 内存与传输开
 | `--data_root` / `--data_path` | MPP：data/official/mpp；VICON：data/VICON；Poseidon：poseidon/camlab-ethz/down_streams | 数据根目录。MPP YAML 的相对数据条目拼在此目录下，绝对条目（含展开后的 ~）保持自身位置。VICON 自动重定位 folder/path/data_path；显式 config_override 的目录优先。Poseidon 传给官方 get_dataset。 |
 | `--yaml_config` | 优先 data/official/configs/mpp_avit_L.yaml，否则官方 MPP config/mpp_avit_L_config.yaml | MPP 架构和数据路径配置。 |
 | `--config` | `basic_config` | MPP YAML 中读取的配置段名。 |
-| `--config_dir` | 官方 VICON checkout 的 configs/ | VICON Hydra 配置目录。 |
+| `--config_dir` | 本仓库 VICON/configs/ | 随仓库维护的旧实验版 VICON Hydra 配置目录，默认 model.type=crop。 |
 | `--config_name` | `default` | VICON Hydra 主配置名。 |
 | `--config_override` | 空列表 | 可重复传入 Hydra KEY=VALUE，例如 datasets.types.NS2D.folder=/data/NS。模型架构的覆盖值必须与 checkpoint 一致。 |
 | `--dataset` | `fluids.incompressible.PiecewiseConstants` | Poseidon 官方数据集注册名称，同时用于物理通道规则及缓存目录。须与数据和 checkpoint 的任务一致。 |
@@ -95,6 +95,7 @@ low-gpu 会改变 compression 的数值精度，并增加 CPU 内存与传输开
 Poseidon 自动生成的 Fisher/rank 缓存路径包含 `_fbs8` 等 Fisher batch 标签，避免调整批大小后误读另一批大小生成的结果；这会使历史默认路径不再自动命中。历史缓存保留原文件，确认兼容后可以显式指定。
 Poseidon Fisher/rank 路径还包含 `_derivonly`，隔离旧零阶损失产生的缓存。旧入口生成的 Fisher 和由其生成的 rank 应重新计算；显式指定缓存路径时不会检查其损失定义。
 缓存路径没有完整 checkpoint/配置内容哈希；调用者必须保证复用的是同一模型、数据和采样设置的兼容缓存。
+VICON 使用随仓库维护的 research 版本，默认缓存标签含 `vicon_research_v1`，避免自动复用此前其他 VICON 版本的缓存；显式缓存路径仍需自行确认兼容性。
 
 CLI 在输出目录保存 `run_config.json`，记录完整命令参数、解析后的路径、缓存在运行前是否存在、Torch 版本及 checkpoint config 的 SHA-256；成功后补充 rank JSON 的 SHA-256。config 哈希不能证明权重文件相同，缓存存在记录也不能证明缓存生成时的参数；这些信息不能替代一致性检查。
 

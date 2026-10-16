@@ -568,9 +568,7 @@ def resolve_cli_paths(args):
         default_data = PROJECT_ROOT / "data/official/mpp"
         calibration_tag = f"cali{args.calibration_num}_seed{args.calibration_seed}"
     elif args.model_type == "vicon":
-        args.runtime_root = PROJECT_ROOT / "vicon/VICON"
-        if not (args.runtime_root / "src").is_dir():
-            args.runtime_root = PROJECT_ROOT / "VICON"
+        args.runtime_root = PROJECT_ROOT / "VICON"
         default_config = args.runtime_root / "configs"
         default_checkpoint = PROJECT_ROOT / "models/VICON/model.pth"
         default_data = PROJECT_ROOT / "data/VICON"
@@ -598,6 +596,8 @@ def resolve_cli_paths(args):
         whitening_tag += "_rankscale"
     dataset_tag = args.dataset if args.model_type == "poseidon" else args.model_type
     input_tag = f"{calibration_tag}_{trace_tag}_{whitening_tag}"
+    if args.model_type == "vicon":
+        input_tag = f"vicon_research_v1_{input_tag}"
     if args.batch_size is not None:
         input_tag += f"_bs{args.batch_size}"
     fisher_tag = f"{input_tag}_{args.gradient_loss}_br{args.balance_ratio}_decay{args.decay_alpha}"
@@ -686,8 +686,8 @@ def load_model_and_data(args):
     # ===================================================================
     elif args.model_type == "vicon":
         if not (package_root / "src").is_dir():
-            raise FileNotFoundError(f"Official VICON source is missing: {package_root}/src. "
-                                    "Install the full Eydcao/VICON checkout under vicon/VICON/.")
+            raise FileNotFoundError(f"Bundled VICON source is missing: {package_root}/src. "
+                                    "Restore the VICON directory from this SAFE-SVD checkout.")
         # This checkout also uses absolute imports such as model_utils/utils.
         sys.path.insert(0, str(package_root.parent))
         sys.path.insert(0, str(package_root / "src"))

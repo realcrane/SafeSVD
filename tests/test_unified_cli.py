@@ -95,6 +95,8 @@ class UnifiedCLITests(unittest.TestCase):
                         "--model", "vicon", "--ckpt_path", "weights.pth", "--data_root", "data",
                         "--save_path", "out"]))
                     self.assertEqual(vicon.ckpt_path, invocation / "weights.pth")
+                    self.assertEqual(vicon.runtime_root, repository / "VICON")
+                    self.assertIn("vicon_research_v1", str(vicon.profile_cache))
                     self.assertEqual(vicon.data_root, invocation / "data")
                     self.assertEqual(vicon.save_path, invocation / "out")
                     poseidon = self.entry.resolve_cli_paths(self.entry.parse_args(["--model", "poseidon"]))

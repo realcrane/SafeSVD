@@ -28,7 +28,6 @@ models/
 
 # Repos.
 poseidon/
-VICON/
 multiple_physics_pretraining/
 
 # Keep the lightweight evaluation wrapper even though a local Poseidon source

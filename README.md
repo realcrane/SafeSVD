@@ -2,7 +2,10 @@
 
 ## Prepare.
 ### Repo. clone
-Before downloads, clone Poseidon, VICON and MPP repositories under SAFE-SVD.
+VICON is included in this repository under `VICON/`, using the research
+`ICON_CROPPED` architecture that matches our VICON checkpoint. No separate
+VICON clone is needed. See [source provenance](VICON/VENDORED.md).
+Before downloads, clone the Poseidon and MPP repositories under SAFE-SVD.
 For Poseidon, use an unmodified checkout of the official repository; do not
 reuse the local `poseidon_main` research fork:
 
@@ -11,13 +14,11 @@ git clone https://github.com/camlab-ethz/poseidon.git poseidon
 ```
 
 The resulting structure is `SAFE-SVD-v0/poseidon/`,
-`SAFE-SVD-v0/vicon/VICON/`, and
-`SAFE-SVD-v0/mpp/multiple_physics_pretraining/`.  ViCON needs the full
-upstream checkout containing `VICON/src` and `VICON/configs`; MPP needs the
+the bundled `SAFE-SVD-v0/VICON/`, and
+`SAFE-SVD-v0/mpp/multiple_physics_pretraining/`. MPP needs the
 full checkout containing `multiple_physics_pretraining/models/avit.py`.
-These are official upstream source dependencies, not directories to copy from
-another research repository. The VICON/MPP dataset section below gives the
-clone commands and pinned revisions used by the independent preparation helper.
+Poseidon and MPP are upstream source dependencies. VICON's model, data and
+rollout source are maintained directly in this repository.
 
 ### Environment
 ```bash
@@ -60,8 +61,7 @@ already exists, inspect it instead of overwriting it. The helper rejects a
 different revision or tracked local modifications to these upstream sources.
 
 ```bash
-git clone https://github.com/Eydcao/VICON.git vicon/VICON
-git -C vicon/VICON checkout --detach be2e2dc6b327259c55b110340c3b55e30a427317
+# VICON source is already bundled under ./VICON; keep that version.
 git clone https://github.com/PolymathicAI/multiple_physics_pretraining.git mpp/multiple_physics_pretraining
 git -C mpp/multiple_physics_pretraining checkout --detach e751fc25ae5274c3ddc869bf73afd6fcd4163cb5
 git clone https://github.com/pdebench/PDEBench.git data/upstream/PDEBench
@@ -122,7 +122,7 @@ not add HTTP range resume to PDEBench's downloader.
 
 #### 3. Download VICON's PDEArena data with Git LFS
 
-The [VICON preparation guide](https://github.com/Eydcao/VICON/blob/be2e2dc6b327259c55b110340c3b55e30a427317/dataset_prepare/README.md)
+The [bundled VICON preparation guide](VICON/dataset_prepare/README.md)
 uses `pdearena/NavierStokes-2D-conditoned` and excludes a known corrupted file.
 
 ```bash
@@ -327,8 +327,8 @@ python downloads/model_download.py
 This entry point loads the selected model and calibration data, then runs input
 collection, Fisher collection, rank selection, and compression in order. All
 compression and calibration helpers live in this repository. It uses official
-model checkouts under `mpp/multiple_physics_pretraining/`, `vicon/VICON/`
-(or the existing `VICON/`), and `poseidon/scOT/`, prepared as described above.
+model checkouts under `mpp/multiple_physics_pretraining/` and `poseidon/scOT/`,
+and the bundled research VICON source under `VICON/`.
 It does not load another research repository or the `poseidon_main` fork.
 There is no `--source_root` option.
 
@@ -468,10 +468,10 @@ checkpointing, and portable compressed-state format.  Each model retains its
 upstream loader and physical loss conventions.
 
 ```bash
-# ViCON: ./vicon must contain the full upstream ./vicon/VICON checkout.
+# ViCON uses the research source bundled under ./VICON.
 python -m safesvd.cli compress \
   --model vicon \
-  --source-root ./vicon \
+  --source-root . \
   --checkpoint ./models/VICON/model.pth \
   --data-root /datasets/vicon \
   --rank-ratio 0.2 \
@@ -513,7 +513,7 @@ test.
 ```bash
 python -m safesvd.cli evaluate \
   --model vicon \
-  --source-root ./vicon \
+  --source-root . \
   --checkpoint ./models/VICON/model.pth \
   --compressed-model artifacts/vicon/paper/<run>/compressed/compressed_model.pth \
   --data-root /datasets/vicon \
