@@ -233,7 +233,7 @@ def run_vicon(options: ViconOptions) -> Path:
 
 
 def evaluate_vicon(options: ViconEvaluationOptions) -> Path:
-    """Evaluate baseline and optional compressed VICON model on identical test data."""
+    """Evaluate VICON with the research script's shared test-dataset RNG stream."""
     bundle = load_vicon_bundle(
         options.vicon_root, options.model_path, options.data_path, options.device,
         config_dir=options.config_dir, config_name=options.config_name, config_overrides=options.config_overrides,
@@ -294,7 +294,7 @@ def load_vicon_bundle(
     trainer_module = importlib.import_module("VICON.src.trainer")
     dataset_module = importlib.import_module("VICON.src.dataset")
     config = _load_config(config_dir or package_root / "configs", config_name, config_overrides)
-    _apply_data_root(config, data_root)
+    _apply_data_root(config, data_root, config_overrides=config_overrides)
     model_type = str(getattr(config.model, "type", ""))
     constructor = getattr(models, "ICON_CROPPED" if model_type == "crop" else "ICON_UNCROPPED")
     model = constructor(config.model)
@@ -501,17 +501,16 @@ def _evaluate_vicon_model(
     label_energies: dict[str, list[float]] = {}
     physical: dict[str, list[dict[str, float]]] = {}
     with torch.inference_mode():
+        # The research evaluator traverses every dataset for loss first, then
+        # traverses them again for physics. Keep the same dataset instances:
+        # their time-pair RNG advances across both passes and across models.
         for tagged in batches():
             # ViCON's Trainer owns details such as channel/type masking and
             # normalisation.  Do not approximate those with a hand-written MSE.
             loss = float(bundle.loss(model, tagged.payload))
-            output, data, mean, std = bundle.forward(model, tagged.payload)
+            data, _normalization_mean, _normalization_std = bundle.prepare(tagged.payload)
             min_examples = int(bundle.trainer.loss_cfg.min_ex)
-            _initial, labels, channel_mask = data
-            prediction = output[:, min_examples:, :-1]
-            target = labels[:, min_examples:, :-1]
-            type_mask = labels[:, min_examples:, -1:]
-            del prediction, target, type_mask
+            _initial, _labels, channel_mask = data
             # This matches ViCON's evaluation script: use the trainer label
             # helper and account for the spatial dimensions masked by c_mask.
             label = bundle.trainer._get_label(data)[:, min_examples:, :-1]
@@ -522,8 +521,10 @@ def _evaluate_vicon_model(
             )
             losses.setdefault(tagged.category, []).append(loss)
             label_energies.setdefault(tagged.category, []).append(label_energy)
-            # Reconstruct the physical fields after preserving the trainer's
-            # loss semantics above.
+        for tagged in batches():
+            output, data, mean, std = bundle.forward(model, tagged.payload)
+            min_examples = int(bundle.trainer.loss_cfg.min_ex)
+            _initial, labels, _channel_mask = data
             prediction = output[:, min_examples:, :-1]
             target = labels[:, min_examples:, :-1]
             prediction_denormalized = prediction * std[:, :, :-1] + mean[:, :, :-1]
@@ -583,12 +584,13 @@ def _load_config(directory: Path, name: str, overrides: tuple[str, ...] = ()) ->
         return compose(config_name=config_name, overrides=list(overrides))
 
 
-def _apply_data_root(config: Any, data_root: Path) -> None:
-    """Rebase common VICON dataset config fields and expose a stable env var.
+def _apply_data_root(
+    config: Any, data_root: Path, *, config_overrides: tuple[str, ...] = (),
+) -> None:
+    """Resolve dataset folders using the same data-root rules as safe_svd.main.
 
-    Direct absolute dataset paths are deliberately rejected when they point
-    outside ``data_root``.  Silently retaining a path from the checkout
-    author's machine would make the public ``--data-root`` contract unsafe.
+    Keep ordinary relative subdirectories; rebase legacy absolute/../ paths
+    using their basename. Explicit Hydra path overrides take precedence.
     """
     try:
         from omegaconf import DictConfig, ListConfig, open_dict
@@ -596,32 +598,26 @@ def _apply_data_root(config: Any, data_root: Path) -> None:
         raise ModuleNotFoundError("VICON requires omegaconf") from exc
     root = data_root.expanduser().resolve()
     os.environ["SAFE_SVD_DATA_ROOT"] = str(root)
-    unresolved_absolute_paths: list[str] = []
+    explicit_fields = {override.lstrip("+").split("=", 1)[0] for override in config_overrides}
 
-    def is_within_root(path: Path) -> bool:
-        try:
-            path.expanduser().resolve().relative_to(root)
-            return True
-        except ValueError:
-            return False
-
-    def visit(value: Any, in_datasets: bool = False, location: str = "config") -> None:
+    def visit(value: Any, in_datasets: bool = False, location: str = "") -> None:
         if isinstance(value, DictConfig):
             with open_dict(value):
                 for key in list(value.keys()):
                     child = value[key]
                     lowered = str(key).lower()
                     dataset_scope = in_datasets or lowered in {"datasets", "dataset"}
-                    child_location = f"{location}.{key}"
+                    child_location = f"{location}.{key}" if location else str(key)
                     if lowered in {"data_root", "dataset_root", "data_dir", "dataset_dir"}:
                         value[key] = str(root)
-                    elif dataset_scope and lowered in {"path", "data_path", "root", "file"} and isinstance(child, str):
+                    elif dataset_scope and lowered in {"folder", "path", "data_path", "root", "file"} and isinstance(child, str):
                         source = Path(child).expanduser()
-                        if source.is_absolute():
-                            if not is_within_root(source):
-                                unresolved_absolute_paths.append(f"{child_location}={child!r}")
+                        if child_location in explicit_fields:
+                            destination = source
                         else:
-                            value[key] = str(root / source)
+                            relative = Path(source.name) if source.is_absolute() or ".." in source.parts else source
+                            destination = root / relative
+                        value[key] = str(destination.resolve())
                     else:
                         visit(child, dataset_scope, child_location)
         elif isinstance(value, ListConfig):
@@ -629,13 +625,6 @@ def _apply_data_root(config: Any, data_root: Path) -> None:
                 visit(child, in_datasets, f"{location}[{index}]")
 
     visit(config)
-    if unresolved_absolute_paths:
-        details = "; ".join(unresolved_absolute_paths[:3])
-        suffix = "" if len(unresolved_absolute_paths) <= 3 else f"; and {len(unresolved_absolute_paths) - 3} more"
-        raise ValueError(
-            "VICON config contains absolute dataset paths outside --data-root: "
-            f"{details}{suffix}. Pass matching --config-override values or choose a data root that contains them."
-        )
 
 
 def _checkpoint_state_dict(path: Path) -> Mapping[str, torch.Tensor]:

@@ -31,9 +31,10 @@ def parser() -> argparse.ArgumentParser:
 
     evaluate = commands.add_parser("evaluate", help="evaluate original and compressed MPP models")
     _add_common(evaluate)
+    evaluate.set_defaults(batch_size=1)
     evaluate.add_argument("--compressed-path", type=Path)
     evaluate.add_argument("--output-path", type=Path, required=True)
-    evaluate.add_argument("--max-batches", type=int)
+    evaluate.add_argument("--max-batches", type=int, default=64)
     return result
 
 

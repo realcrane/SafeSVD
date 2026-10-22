@@ -68,13 +68,11 @@ class MPPAdapter(Adapter):
             "--data-path", str(request.assets.resolved_data_root),
             "--output-path", str(request.output_path),
             "--device", request.device,
+            "--batch-size", str(request.config.batch_size if request.config.batch_size is not None else 1),
+            "--max-batches", str(request.config.max_batches if request.config.max_batches is not None else 64),
         ]
         if request.compressed_model is not None:
             command.extend(("--compressed-path", str(request.compressed_model)))
-        if request.config.batch_size is not None:
-            command.extend(("--batch-size", str(request.config.batch_size)))
-        if request.config.max_batches is not None:
-            command.extend(("--max-batches", str(request.config.max_batches)))
         return [*command, *request.config.extra]
 
     def evaluation_environment(self, request: EvaluationRequest) -> dict[str, str]:

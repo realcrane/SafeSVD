@@ -69,11 +69,11 @@ def parser() -> argparse.ArgumentParser:
     evaluate_parser.add_argument("--output", type=Path)
     evaluate_parser.add_argument("--source-root", type=Path)
     evaluate_parser.add_argument("--device", default="cuda")
-    evaluate_parser.add_argument("--batch-size", type=int)
+    evaluate_parser.add_argument("--batch-size", type=int, help="Evaluation batch size (MPP: 1; VICON: 128).")
     evaluate_parser.add_argument(
         "--max-batches",
         type=int,
-        help="For VICON/MPP, cap evaluation batches per dataset/file.",
+        help="Cap evaluation batches per dataset/file (MPP: 64; VICON: all).",
     )
     evaluate_parser.add_argument("--dry-run", action="store_true")
     evaluate_parser.add_argument(

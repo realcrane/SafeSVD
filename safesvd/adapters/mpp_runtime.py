@@ -70,8 +70,8 @@ class MPPEvaluationOptions:
     device: str
     yaml_config: Path | None = None
     config_name: str = "basic_config"
-    batch_size: int | None = None
-    max_batches: int | None = None
+    batch_size: int | None = 1
+    max_batches: int | None = 64
 
 
 @dataclass(frozen=True)

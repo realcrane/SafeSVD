@@ -506,7 +506,8 @@ file.  The adapter caches profile/Fisher statistics and ranks under `cache/vicon
 ## Unified evaluation
 
 Evaluate the original checkpoint and, optionally, the compressed checkpoint
-on identical upstream test data.  The output JSON records aggregate and
+using the upstream validation/test splits and research evaluation protocol.
+The output JSON records aggregate and
 per-dataset physical metrics; `--max-batches` is useful for a quick smoke
 test.
 
@@ -532,6 +533,19 @@ ViCON reports its upstream masked MSE and relative loss plus task-specific
 Sobolev and, where applicable, incompressible-flow divergence and vorticity
 metrics.  MPP reports relative error, Sobolev error, and the corresponding incompressible NS,
 compressible NS, SWE, or diffusion-reaction physical metrics.
+
+MPP defaults to batch size 1 and at most 64 batches per validation file,
+with shuffle seed 0. VICON defaults to batch size 128 and all test batches,
+using `test_seed` from its configuration (84 by default). For each VICON
+model, the loss pass precedes the physics pass. The same Dataset instances
+are shared across passes and models, so time-pair RNG state advances in the
+same order as the original research evaluator.
+
+For VICON, `--data-root` contains `2D_Train_Rand`, `2D_Train_Turb`, and
+`NavierStokes-2D-conditoned`. Dataset `folder` paths are resolved below this
+root; legacy absolute paths and paths containing `..` use their basename.
+Explicit `--config-override datasets.types.<name>.folder=...` values take
+precedence (pass backend options after `--`).
 
 <!-- SAFE-SVD is a unified, reproducible interface for applying SVD-based
 compression to three scientific foundation models:
