@@ -327,7 +327,8 @@ python downloads/model_download.py
 This entry point loads the selected model and calibration data, then runs input
 collection, Fisher collection, rank selection, and compression in order. All
 compression and calibration helpers live in this repository. It uses official
-model checkouts under `mpp/multiple_physics_pretraining/` and `poseidon/scOT/`,
+model checkouts under `mpp/multiple_physics_pretraining/` (or the root-level
+`multiple_physics_pretraining/`) and `poseidon/scOT/`,
 and the bundled research VICON source under `VICON/`.
 It does not load another research repository or the `poseidon_main` fork.
 There is no `--source_root` option.
@@ -368,6 +369,63 @@ models, batch-size controls, cache reuse and Poseidon memory guidance.
 use the same entry point. MPP/VICON default to `--rank_selector legacy` and
 Poseidon to `safe`; `--rank_selector safe` selects the shared strict-budget
 allocator for any model.
+
+## MPP research alignment
+
+Both `python -m safe_svd.main --model mpp` and `python -m safesvd.cli compress
+--model mpp` use the same compression implementation. The research MySVD route
+uses `legacy` ranks, seed 42, alpha 0.7, L1 Fisher, balance ratio 10 and trace
+alignment. SVD truncation factors are converted to float32 **before**
+dewhitening, as in MySVD. Alpha zero still uses sequential `comb` compression.
+The public compression CLI now defaults to `legacy` for MPP; Python API
+defaults remain unchanged. `safe` is an explicit alternative, not a reproduction
+of the original greedy rank allocation.
+
+For the root-level source checkout and YAML containing relative `2D/...` paths:
+
+```bash
+python -m safe_svd.main --model mpp \
+  --yaml_config ./multiple_physics_pretraining/config/mpp_avit_L_config.yaml \
+  --config basic_config \
+  --ckpt_path /absolute/path/to/MPP_AViT_L \
+  --data_root ./data/raw_data \
+  --rank_ratio 0.4 --rank_selector legacy \
+  --calibration_num 16 --calibration_seed 42 --batch_size 1 \
+  --alpha 0.7 --use_fisher y --gradient_loss l1 \
+  --balance_ratio 10 --decay_alpha 1 --use_trace_balance y
+```
+
+Replace the checkpoint placeholder with a readable file; a broken download
+symlink is not repaired automatically. Both source layouts are auto-detected;
+the nested layout is preferred when both contain `models/avit.py`. Calibration
+loads only the training dataset and uses the original per-file batch limit.
+
+Automatically generated cache/rank paths use a new `mpp_research_v2` namespace
+or a versioned hash. Default compressed-model paths separate rank selectors.
+Old compression checkpoints cannot be resumed under the new numerical policy;
+use a new output directory. Existing files are not deleted. Explicit cache and
+output paths remain the caller's responsibility.
+
+Evaluate the newly saved model with:
+
+```bash
+python -m safesvd.cli evaluate --model mpp \
+  --checkpoint /absolute/path/to/MPP_AViT_L --data-root ./data/raw_data \
+  --compressed-model /path/to/new_run/compressed_model.pt \
+  --output /path/to/new_run/metrics.json \
+  -- --yaml-config config/mpp_avit_L_config.yaml
+```
+
+Here the backend YAML path is relative to the detected MPP package. The
+evaluation defaults match the research `mpp/eval/eval_all.py`: validation split, batch size
+1, deterministic per-file shuffle with seed 0, at most 64 complete batches per
+file, and the research MSE/physics metrics. JSON includes protocol and batch
+counts. Both the newly saved full-model checkpoints and older portable state
+dict checkpoints are accepted; load only trusted checkpoint files.
+
+Regression tests compare ranks, factorization, and four physics categories
+against the research source, and cover compression → save → reload → evaluation.
+These small CPU tests do not replace a full AViT-L GPU/data validation run.
 
 ## VICON research alignment
 

@@ -63,7 +63,7 @@ low-gpu 会改变 compression 的数值精度，并增加 CPU 内存与传输开
 | CLI 参数 | 默认值 | 定义 |
 | --- | --- | --- |
 | `--ckpt_path` / `--model_path` | MPP：models/MPP/MPP_AViT_L；VICON：models/VICON/model.pth；Poseidon：models/poseidon/数据集名称 | MPP/VICON 为 checkpoint 文件；Poseidon 为包含 config.json 与权重的具体目录。所有默认路径均相对于本仓库。 |
-| `--data_root` / `--data_path` | MPP：data/official/mpp；VICON：data/VICON；Poseidon：poseidon/camlab-ethz/down_streams | 数据根目录。MPP YAML 的相对数据条目拼在此目录下，绝对条目（含展开后的 ~）保持自身位置。VICON 自动重定位 folder/path/data_path；显式 config_override 的目录优先。Poseidon 传给官方 get_dataset。 |
+| `--data_root` / `--data_path` | MPP：优先已存在的 data/raw_data，否则 data/official/mpp；VICON：data/VICON；Poseidon：poseidon/camlab-ethz/down_streams | 数据根目录。MPP YAML 的相对数据条目拼在此目录下，绝对条目（含展开后的 ~）保持自身位置。VICON 自动重定位 folder/path/data_path；显式 config_override 的目录优先。Poseidon 传给官方 get_dataset。 |
 | `--yaml_config` | 优先 data/official/configs/mpp_avit_L.yaml，否则官方 MPP config/mpp_avit_L_config.yaml | MPP 架构和数据路径配置。 |
 | `--config` | `basic_config` | MPP YAML 中读取的配置段名。 |
 | `--config_dir` | 本仓库 VICON/configs/ | 随仓库维护的旧实验版 VICON Hydra 配置目录，默认 model.type=crop。 |
@@ -94,7 +94,8 @@ low-gpu 会改变 compression 的数值精度，并增加 CPU 内存与传输开
 改变 batch_size 会改变默认缓存路径中的 bs 标签。若压缩 OOM 后仅降低前向批大小，想复用已经完成的 Input/Fisher/Rank，必须显式指定原来的三个缓存文件。
 Poseidon 自动生成的 Fisher/rank 缓存路径包含 `_fbs8` 等 Fisher batch 标签，避免调整批大小后误读另一批大小生成的结果；这会使历史默认路径不再自动命中。历史缓存保留原文件，确认兼容后可以显式指定。
 Poseidon Fisher/rank 路径还包含 `_derivonly`，隔离旧零阶损失产生的缓存。旧入口生成的 Fisher 和由其生成的 rank 应重新计算；显式指定缓存路径时不会检查其损失定义。
-缓存路径没有完整 checkpoint/配置内容哈希；调用者必须保证复用的是同一模型、数据和采样设置的兼容缓存。
+缓存路径没有完整 checkpoint 权重/数据内容哈希；调用者必须保证复用的是同一模型、数据和采样设置的兼容缓存。
+MPP 自动检测 `mpp/multiple_physics_pretraining/` 或根目录 `multiple_physics_pretraining/` 中的完整源码；两者都存在时优先前者。统一入口默认缓存标签含 `mpp_research_v2`，指纹包含 checkpoint 路径/大小/mtime、数据与源码根目录、YAML 路径/内容及配置名称。不同 selector 的 rank 和默认模型输出路径分开。旧缓存不删除也不自动复用；旧版本的压缩断点不能续跑，应使用新的 save_path。显式缓存路径仍需调用者检查兼容性。
 VICON 使用随仓库维护的 research 版本，默认缓存标签含 `vicon_research_v2`，并包含 checkpoint 路径/大小/mtime、数据根目录及配置选项的指纹。不同 selector 的 rank 和默认模型输出路径分开。旧缓存不删除，也不自动复用。
 VICON Input/Fisher 缓存还保存各阶段结束时的全局 RNG、dataset RNG 和文件顺序；加载缓存时恢复这些状态，避免缓存命中改变后续 calibration 数据。Fisher 文件现在包含 `fisher_mat` 和 `vicon_rng_state`。没有 RNG 状态的历史 Input/Fisher 缓存不能直接恢复，应选择新缓存目录重算。仅传入旧 rank JSON 仍可固定原 rank。
 VICON 的 batch size、worker 数、数据顺序必须保持一致；不要像 Poseidon 那样降低 batch size 后显式复用 VICON 缓存。此机制不支持 `persistent_workers=True`，也不校验数据文件内容。
@@ -107,6 +108,7 @@ CLI 在输出目录保存 `run_config.json`，记录完整命令参数、解析�
 
 Poseidon reconstruction 还遵循参考实现的 float32 精度策略：`origin` 的 Cholesky 因子/逆先以 float32 构造，随后转换成 compute_dtype；SVD 截断后的因子在逆变换前转为 float32。GPU 模式的协方差和 SVD 仍使用 float64。
 VICON 同样在 SVD 截断后、反白化前把两个因子转为 float32，与 MySVD `comb_compress.py` 一致。`alpha=0` 默认仍走 comb，而不是改走静态 Input 缓存分解。
+MPP 也在 SVD 截断后、反白化前把因子转为 float32，与原 MySVD 一致；`safesvd.cli compress` 和统一入口现在共用同一条 MPP 压缩流程，alpha=0 仍走 comb。MPP 评估器兼容统一入口保存的完整 nn.Module 和历史 portable state_dict；请只加载可信来源的 checkpoint。
 
 ## 7. Python main() 接口
 

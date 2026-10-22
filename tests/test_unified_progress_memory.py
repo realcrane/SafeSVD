@@ -114,7 +114,7 @@ class ProgressMemoryTests(unittest.TestCase):
 
     def test_eager_covariance_release_matches_existing_factorization(self):
         from safe_svd.compress import compress
-        from safesvd.core.factorization import combined_input_factors_consuming
+        from safe_svd.helper.whitener import right_whitener
         torch.manual_seed(719)
         model = nn.Sequential(nn.Linear(4, 6)).double()
         h, hp = torch.randn(12, 4).double(), torch.randn(12, 4).double()
@@ -124,11 +124,18 @@ class ProgressMemoryTests(unittest.TestCase):
             yield "data", h, hp
         for alpha in (0., 0.7, 1.):
             stats = {"hh": h.T @ h / 12, "hph": h.T @ hp / 12, "hphp": hp.T @ hp / 12}
-            expected = combined_input_factors_consuming(model[0].weight, stats, 2, alpha=alpha, left_whitener=metric)
+            _, inverse = right_whitener(alpha * stats["hphp"] + (1 - alpha) * stats["hh"],
+                                       method="spectral", eps=1e-6, eps_mode="absolute", sample_count=12)
+            matrix = (left @ model[0].weight) @ (((1 - alpha) * stats["hh"] + alpha * stats["hph"]) @ inverse)
+            u, s, vh = torch.linalg.svd(matrix, full_matrices=False)
+            # MPP reference dewhitens truncated factors in float32.
+            root = s[:2].sqrt()
+            expected_left = (metric[1].float() @ (u[:, :2] * root).float()).double()
+            expected_right = ((root[:, None] * vh[:2]).float() @ inverse.T.float()).double()
             student = compress(model, [], {"0": 2}, model_type="mpp", device="cpu", alpha=alpha,
                                left_metrics={"0": metric}, capture_fn=capture, progress=False)
             torch.testing.assert_close(student[0][1].weight @ student[0][0].weight,
-                                       expected.left @ expected.right, rtol=1e-8, atol=1e-9)
+                                       expected_left @ expected_right, rtol=1e-8, atol=1e-9)
 
 
 if __name__ == "__main__":

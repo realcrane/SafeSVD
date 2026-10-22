@@ -32,7 +32,7 @@ def parser() -> argparse.ArgumentParser:
         "--rank-selector",
         choices=("safe", "legacy"),
         default=None,
-        help="Rank allocator (default: legacy for VICON, safe otherwise).",
+        help="Rank allocator (default: legacy for MPP/VICON, safe for Poseidon).",
     )
     compress_parser.add_argument("--calibration-size", type=int, required=True)
     compress_parser.add_argument(
@@ -210,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command != "compress":
         raise AssertionError(f"Unhandled command: {args.command}")
     if args.rank_selector is None:
-        args.rank_selector = "legacy" if args.model == "vicon" else "safe"
+        args.rank_selector = "safe" if args.model == "poseidon" else "legacy"
     extra = tuple(args.extra[1:] if args.extra[:1] == ["--"] else args.extra)
     _validate_backend_extra(args.model, extra, evaluation=False)
     calibration_seed = args.calibration_seed

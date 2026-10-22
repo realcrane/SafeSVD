@@ -419,11 +419,15 @@ def save_portable_checkpoint(
 
 
 def load_state_dict_payload(path: Path) -> Mapping[str, torch.Tensor]:
-    """Read SAFE-SVD or legacy state-dict checkpoints."""
+    """Read trusted SAFE-SVD state dicts or research full-model checkpoints."""
     try:
         payload = torch.load(path, map_location="cpu", weights_only=False)
     except TypeError:  # pragma: no cover - older PyTorch
         payload = torch.load(path, map_location="cpu")
+    if isinstance(payload, nn.Module):
+        # MPP MySVD and safe_svd.main save the complete compressed model.
+        # Rebuild its low-rank layers on the current evaluator architecture.
+        return payload.state_dict()
     if not isinstance(payload, Mapping):
         raise TypeError(f"{path} does not contain a state dictionary payload")
     state_dict = payload.get("state_dict", payload.get("model_state_dict", payload))

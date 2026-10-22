@@ -17,21 +17,14 @@ import torch.nn.functional as functional
 from torch.utils.data import DataLoader
 
 from safesvd.adapters.common_runtime import (
-    CategoryAwareStatistics,
     TaggedBatch,
-    cache_tagged_batches,
-    collect_fisher_whiteners,
-    collect_input_whiteners,
-    get_module_by_name,
     load_compressed_state,
     model_parameter_report,
     resolve_device,
-    save_portable_checkpoint,
-    set_module_by_name,
     write_json,
 )
 from safesvd.adapters.mpp_physics import SOBOLEV_ORDERS, average_metrics, physics_metrics
-from safesvd.core import CompressionCallbacks, allocate_ranks, compress_clean_input, compress_sequentially
+from safesvd.core import allocate_ranks
 
 
 @dataclass(frozen=True)
@@ -103,106 +96,28 @@ class MPPBundle:
 
 
 def run_mpp(options: MPPOptions) -> Path:
-    """Run the MPP data/model route through the shared SAFE-SVD core."""
+    """Use the research-aligned pipeline shared with python -m safe_svd.main."""
+    from safe_svd.main import main as compress_mpp
+
     _validate_options(options)
     bundle = load_mpp_bundle(
         options.mpp_root, options.model_path, options.data_path, options.device,
-        yaml_config=options.yaml_config, config_name=options.config_name, batch_size=options.batch_size,
+        yaml_config=options.yaml_config, config_name=options.config_name,
+        batch_size=options.batch_size, include_validation=False,
     )
-    batches = _mpp_batch_factory(
-        bundle, bundle.train_dataset, labels_from=bundle.train_dataset,
-        calibration_size=options.calibration_size, seed=options.calibration_seed,
+    compress_mpp(
+        bundle.model, bundle.train_dataset, model_type="mpp", params=bundle.params,
+        rank_ratio=options.rank_ratio, rank_selector=options.rank_selector,
+        device=bundle.device, alpha=options.alpha, compress_mode="comb",
+        use_fisher=options.use_fisher, gradient_loss=options.fisher_loss,
+        balance_ratio=options.balance_ratio, decay_alpha=options.decay_alpha,
+        use_trace_balance=options.trace_balance, calibration_seed=options.calibration_seed,
+        batches_per_dset=options.calibration_size / bundle.params.batch_size,
+        profile_cache=options.profile_path, fisher_cache=options.fisher_path,
+        rank_cache=options.rank_path, save_path=options.save_path,
+        overwrite_cache=options.overwrite,
     )
-    profile = _load_or_collect(
-        options.profile_path,
-        options.overwrite,
-        lambda: collect_input_whiteners(
-            bundle.model, batches, bundle_forward(bundle), device=bundle.device,
-            trace_balance=options.trace_balance, category_average_without_trace=False,
-        ),
-    )
-    fisher = None
-    if options.use_fisher:
-        fisher = _load_or_collect(
-            options.fisher_path,
-            options.overwrite,
-            lambda: collect_fisher_whiteners(
-                bundle.model,
-                batches,
-                _mpp_fisher_loss(bundle, options.fisher_loss, options.balance_ratio, options.decay_alpha),
-                device=bundle.device,
-                trace_balance=options.trace_balance,
-                category_average_without_trace=False,
-            ),
-        )
-    ranks = _load_or_select_ranks(options, bundle.model, fisher, profile)
-
-    options.save_path.mkdir(parents=True, exist_ok=True)
-    in_progress = options.save_path / "compressing_model.pt"
-    initial_student: nn.Module | None = None
-    compressed_layers: set[str] | None = None
-    if options.alpha != 0 and in_progress.is_file() and not options.overwrite:
-        partial = _torch_load(in_progress)
-        if isinstance(partial, Mapping) and isinstance(partial.get("model"), nn.Module):
-            initial_student = partial["model"]
-            compressed_layers = set(partial.get("compressed_layers", ()))
-            print(f"Resuming MPP compression after {len(compressed_layers)} layers", flush=True)
-
-    total_layers = sum(isinstance(module, nn.Linear) for module in bundle.model.modules())
-    checkpoint_every = max(1, total_layers // 10)
-
-    def checkpoint(student: nn.Module, done: set[str]) -> None:
-        torch.save({"model": student.cpu(), "compressed_layers": sorted(done)}, in_progress)
-        student.to(bundle.device)
-
-    compression_batches = cache_tagged_batches(batches) if options.alpha != 0 else batches
-    callbacks = CompressionCallbacks(
-        capture_inputs=lambda _model, _name: (),
-        get_module=get_module_by_name,
-        set_module=set_module_by_name,
-        checkpoint=checkpoint,
-        progress=_progress("MPP"),
-        capture_statistics=CategoryAwareStatistics(
-            compression_batches, bundle_forward(bundle), device=bundle.device,
-            trace_balance=options.trace_balance, category_average_without_trace=False,
-        ),
-    )
-    if options.alpha == 0:
-        compressed = compress_clean_input(
-            bundle.model, ranks, profile, callbacks, device=bundle.device, left_whiteners=fisher,
-        )
-    else:
-        compressed = compress_sequentially(
-            bundle.model,
-            ranks,
-            callbacks,
-            device=bundle.device,
-            alpha=options.alpha,
-            left_whiteners=fisher,
-            checkpoint_every=checkpoint_every,
-            initial_student=initial_student,
-            compressed_layers=compressed_layers,
-        )
-    output = save_portable_checkpoint(
-        options.save_path / "compressed_model.pt",
-        compressed,
-        model_name="mpp",
-        ranks=ranks,
-        metadata={
-            "source_root": str(options.mpp_root),
-            "yaml_config": str(_yaml_config(options)),
-            "config_name": options.config_name,
-            "checkpoint": str(options.model_path),
-            "data_root": str(options.data_path),
-            "alpha": options.alpha,
-            "rank_ratio": options.rank_ratio,
-            "rank_selector": options.rank_selector,
-        },
-    )
-    if in_progress.exists():
-        in_progress.unlink()
-    print(f"Compressed MPP model saved to {output}")
-    return output
+    return options.save_path / "compressed_model.pt"
 
 
 def evaluate_mpp(options: MPPEvaluationOptions) -> Path:
@@ -220,7 +135,11 @@ def evaluate_mpp(options: MPPEvaluationOptions) -> Path:
         max_batches=options.max_batches,
     )
     origin = _evaluate_mpp_model(bundle, bundle.model, batches)
-    payload: dict[str, Any] = {"model": "mpp", "origin": {"model": str(options.model_path), "metrics": origin}}
+    payload: dict[str, Any] = {
+        "model": "mpp", "protocol": "research_per_file", "split": "val", "sampling_seed": 0,
+        "batch_size": int(bundle.params.batch_size), "max_batches_per_file": options.max_batches,
+        "origin": {"model": str(options.model_path), "metrics": origin},
+    }
     if options.compressed_path is not None:
         # AViT-L is large enough that keeping its baseline weights on GPU while
         # constructing the compressed topology can exceed ordinary evaluator
@@ -274,6 +193,7 @@ def load_mpp_bundle(
     yaml_config: Path | None = None,
     config_name: str = "basic_config",
     batch_size: int | None = None,
+    include_validation: bool = True,
 ) -> MPPBundle:
     """Build AViT and its train/validation datasets using the original YAML contract."""
     package_root = find_mpp_package(root)
@@ -291,9 +211,6 @@ def load_mpp_bundle(
     if batch_size is not None:
         params["batch_size"] = batch_size
     target = resolve_device(device)
-    model = avit_module.build_avit(params).to(target)
-    model.load_state_dict(_checkpoint_state_dict(checkpoint))
-    model.eval()
     _unused_loader, train_dataset, _sampler = datasets_module.get_data_loader(
         params,
         params.train_data_paths,
@@ -302,9 +219,14 @@ def load_mpp_bundle(
         rank=0,
         train_offset=getattr(params, "embedding_offset", 0),
     )
-    _unused_loader, valid_dataset, _sampler = datasets_module.get_data_loader(
-        params, params.valid_data_paths, distributed=False, split="val", rank=0,
-    )
+    valid_dataset = None
+    if include_validation:
+        _unused_loader, valid_dataset, _sampler = datasets_module.get_data_loader(
+            params, params.valid_data_paths, distributed=False, split="val", rank=0,
+        )
+    model = avit_module.build_avit(params).to(target)
+    model.load_state_dict(_checkpoint_state_dict(checkpoint))
+    model.eval()
     return MPPBundle(package_root, params, model, train_dataset, valid_dataset, target)
 
 
@@ -460,7 +382,7 @@ def _evaluate_mpp_model(
     return {
         **model_parameter_report(model),
         "datasets": {
-            title: {"category": categories[title], **average_metrics(entries)}
+            title: {"category": categories[title], "batches": len(entries), **average_metrics(entries)}
             for title, entries in values.items()
         },
     }
@@ -471,8 +393,9 @@ def _rebase_data_paths(params: Any, data_root: Path) -> None:
         result: list[list[Any]] = []
         for path_spec in paths:
             values = list(path_spec)
-            if values and isinstance(values[0], str) and not Path(values[0]).is_absolute():
-                values[0] = str(data_root / values[0])
+            if values and isinstance(values[0], str):
+                path = Path(values[0]).expanduser()
+                values[0] = str(path if path.is_absolute() else data_root / path)
             result.append(values)
         return result
 
@@ -484,7 +407,7 @@ def _checkpoint_state_dict(path: Path) -> Mapping[str, torch.Tensor]:
     payload = _torch_load(path)
     if not isinstance(payload, Mapping):
         raise TypeError(f"MPP checkpoint {path} is not a mapping")
-    state = payload.get("model_state", payload.get("state_dict", payload))
+    state = payload.get("model_state", payload.get("model_state_dict", payload.get("state_dict", payload)))
     if not isinstance(state, Mapping):
         raise TypeError(f"MPP checkpoint {path} does not contain a state dict")
     return {key.removeprefix("module."): value for key, value in state.items() if torch.is_tensor(value)}

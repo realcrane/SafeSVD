@@ -32,6 +32,7 @@ from safe_svd.helper.collector.vicon_attention import convert_attn_to_linear
 from safe_svd.rank import allocate_ranks
 from safe_svd.compress import compress
 from safe_svd.helper.collector import vicon_rng
+from safesvd.adapters.mpp_paths import default_mpp_package
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -334,12 +335,16 @@ def main(
     }
     if model_type == "vicon":
         compression_config["vicon_alignment_version"] = 2
+    if model_type == "mpp":
+        compression_config["mpp_alignment_version"] = 2
     if checkpoint_path is not None and checkpoint_path.is_file() and not overwrite_cache:
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         if not isinstance(checkpoint, dict) or "compressed_layers" not in checkpoint:
             raise ValueError(f"Invalid compression checkpoint: {checkpoint_path}")
         if model_type == "vicon" and checkpoint.get("compression_config", {}).get("vicon_alignment_version") != 2:
             raise ValueError("VICON checkpoint predates research alignment v2; use a new save_path")
+        if model_type == "mpp" and checkpoint.get("compression_config", {}).get("mpp_alignment_version") != 2:
+            raise ValueError("MPP checkpoint predates research alignment v2; use a new save_path")
         if "rank_dict" in checkpoint and checkpoint["rank_dict"] != rank_dict:
             raise ValueError("Checkpoint ranks differ from current ranks; use a new save_path or --overwrite_cache (Python: overwrite_cache=True)")
         if "compression_config" in checkpoint and checkpoint["compression_config"] != compression_config:
@@ -576,11 +581,12 @@ def resolve_cli_paths(args):
     # Model code comes only from official checkouts inside this repository.
     # User-supplied file paths are relative to the invocation directory.
     if args.model_type == "mpp":
-        args.runtime_root = PROJECT_ROOT / "mpp/multiple_physics_pretraining"
+        args.runtime_root = default_mpp_package(PROJECT_ROOT)
         prepared_config = PROJECT_ROOT / "data/official/configs/mpp_avit_L.yaml"
         default_config = prepared_config if prepared_config.is_file() else args.runtime_root / "config/mpp_avit_L_config.yaml"
         default_checkpoint = PROJECT_ROOT / "models/MPP/MPP_AViT_L"
-        default_data = PROJECT_ROOT / "data/official/mpp"
+        default_data = (PROJECT_ROOT / "data/raw_data" if (PROJECT_ROOT / "data/raw_data").is_dir()
+                        else PROJECT_ROOT / "data/official/mpp")
         calibration_tag = f"cali{args.calibration_num}_seed{args.calibration_seed}"
     elif args.model_type == "vicon":
         args.runtime_root = PROJECT_ROOT / "VICON"
@@ -611,6 +617,13 @@ def resolve_cli_paths(args):
         whitening_tag += "_rankscale"
     dataset_tag = args.dataset if args.model_type == "poseidon" else args.model_type
     input_tag = f"{calibration_tag}_{trace_tag}_{whitening_tag}"
+    if args.model_type == "mpp":
+        stat = args.ckpt_path.stat() if args.ckpt_path.is_file() else None
+        config_hash = hashlib.sha256(args.yaml_config.read_bytes()).hexdigest() if args.yaml_config.is_file() else None
+        identity = (str(args.ckpt_path), stat.st_size if stat else None, stat.st_mtime_ns if stat else None,
+                    str(args.data_root), str(args.runtime_root), str(args.yaml_config), config_hash, args.config)
+        digest = hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:12]
+        input_tag = f"mpp_research_v2_{digest}_{input_tag}"
     if args.model_type == "vicon":
         # A new namespace prevents reuse of pre-alignment statistics/ranks.
         stat = args.ckpt_path.stat() if args.ckpt_path.is_file() else None
@@ -651,7 +664,8 @@ def load_model_and_data(args):
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable; pass --DEV cpu")
     if not args.ckpt_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {args.ckpt_path}")
+        raise FileNotFoundError(f"Checkpoint not found: {args.ckpt_path}. Check for a broken symlink "
+                                "or pass --ckpt_path pointing to a readable checkpoint file.")
     params, trainer, rollout_fn = None, None, None
     args.train_seed = None
     args.batches_per_dset = 16
@@ -663,7 +677,8 @@ def load_model_and_data(args):
     if args.model_type == "mpp":
         if not (package_root / "models/avit.py").is_file():
             raise FileNotFoundError(f"Official MPP source is missing: {package_root}/models/avit.py. "
-                                    "Install the full PolymathicAI/multiple_physics_pretraining checkout under mpp/.")
+                                    "Install the full PolymathicAI/multiple_physics_pretraining checkout "
+                                    "under mpp/multiple_physics_pretraining/ or multiple_physics_pretraining/.")
         sys.path.insert(0, str(package_root.parent))
         from multiple_physics_pretraining.utils.YParams import YParams
         from multiple_physics_pretraining.models.avit import build_avit
@@ -686,6 +701,11 @@ def load_model_and_data(args):
                 path_spec[0] = str(path)
                 rebased.append(path_spec)
             setattr(params, field, rebased)
+        print("==== Loading MPP train_dataset ====", flush=True)
+        _, calibration_data, _ = get_data_loader(
+            params, params.train_data_paths, distributed=False, split="train", rank=0,
+            train_offset=params.embedding_offset,
+        )
         print(f"==== Loading MPP model: {args.ckpt_path} ====", flush=True)
         model = build_avit(params).to(device)
         checkpoint = torch.load(args.ckpt_path, map_location=device, weights_only=False)
@@ -693,11 +713,6 @@ def load_model_and_data(args):
         state_dict = {key.removeprefix("module."): value for key, value in state_dict.items()}
         model.load_state_dict(state_dict)
         model.eval()
-        print("==== Loading MPP train_dataset ====", flush=True)
-        _, calibration_data, _ = get_data_loader(
-            params, params.train_data_paths, distributed=False, split="train", rank=0,
-            train_offset=params.embedding_offset,
-        )
         # This division is the actual sampling rule in the original MPP main.
         args.batches_per_dset = args.calibration_num / params.batch_size
         print(f"MPP calibration batch limit per file: {args.batches_per_dset}")
@@ -833,6 +848,8 @@ def cli_main(argv=None):
         "poseidon_factor_dtype": "float32" if args.model_type == "poseidon" else None,
         "vicon_alignment_version": 2 if args.model_type == "vicon" else None,
         "vicon_factor_dtype": "float32" if args.model_type == "vicon" else None,
+        "mpp_alignment_version": 2 if args.model_type == "mpp" else None,
+        "mpp_factor_dtype": "float32" if args.model_type == "mpp" else None,
         "capture_cache_device": "cpu",
     }
     run_config_path.write_text(json.dumps(run_config, indent=2) + "\n")

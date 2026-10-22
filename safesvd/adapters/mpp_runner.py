@@ -18,7 +18,7 @@ def parser() -> argparse.ArgumentParser:
     compress.add_argument("--fisher-path", type=Path, required=True)
     compress.add_argument("--rank-path", type=Path, required=True)
     compress.add_argument("--rank-ratio", type=float, required=True)
-    compress.add_argument("--rank-selector", choices=("safe", "legacy"), default="safe")
+    compress.add_argument("--rank-selector", choices=("safe", "legacy"), default="legacy")
     compress.add_argument("--calibration-size", type=int, required=True)
     compress.add_argument("--calibration-seed", type=int, required=True)
     compress.add_argument("--alpha", type=float, required=True)
