@@ -4,7 +4,7 @@ This is the canonical ledger for SAFE-SVD experiments launched from this
 repository. It records only SAFE-SVD compression and SAFE-SVD evaluation runs;
 unrelated projects and other low-rank methods are out of scope.
 
-Last reconciliation: 2026-08-31 02:36:15 BST (2026-08-31 09:36:15 Asia/Shanghai).
+Last reconciliation: 2026-10-22 (Asia/Shanghai).
 
 The remote path `/cs/research/vecg/EasyPDE/SAFE-SVD-v0` is on a shared
 filesystem, so identical artifacts observed from several hosts are recorded
@@ -16,6 +16,12 @@ processes have exited; seed-1204's tmux session remains at an idle shell. No
 `metrics.json` exists for either run, so physical evaluation has not been
 verified. `brent` and `ruddy` were selected because each had an idle NVIDIA
 GeForce RTX 3090 Ti before launch.
+
+The 2026-10-22 reconciliation additionally inspected the completed VICON
+`artifacts/vicon_r08` result through the shared filesystem on `mandarin`. Its
+compression artifact is complete, but its origin/compressed smoke evaluation
+uses different stateful test time-pair traversals; see the completed-run entry
+below for the rank hashes and metric evidence.
 
 ## 未开始
 
@@ -62,6 +68,49 @@ GeForce RTX 3090 Ti before launch.
 No SAFE-SVD runs are currently verified as running.
 
 ## 已完成
+
+### `vicon_legacy_fixed_r0.8`
+
+- Status: `已完成`
+- Outcome: `success` (compression and smoke evaluation); evaluation comparison is not sample-aligned.
+- Task: VICON SAFE-SVD compression compared with the research `physic_model_comp/vicon/MySVD` result.
+- Hyperparameters: rank ratio `0.8`; rank selector `legacy`; calibration size `2048`; fixed-prefix calibration (`random_calibration=n`, train seed `42`); alpha `0.7`; Fisher `l1`; balance ratio `10`; trace alignment enabled; spectral whitening with absolute epsilon `1e-6`; device `cuda`.
+- Host / GPU: original launch host and GPU were not recorded; artifacts are on the shared filesystem and were inspected read-only through `mandarin`.
+- tmux: not recorded.
+- Command:
+
+  ```bash
+  python -m safe_svd.main \
+    --model vicon \
+    --ckpt_path models/VICON/model.pth \
+    --data_root data/processed_data/2D/CFD/converted/ \
+    --rank_ratio 0.8 \
+    --rank_selector legacy \
+    --calibration_num 2048 \
+    --batch_size 128 \
+    --alpha 0.7 \
+    --use_fisher y \
+    --gradient_loss l1 \
+    --balance_ratio 10 \
+    --use_trace_align y \
+    --save_path ./artifacts/vicon_r08 \
+    --DEV cuda
+  ```
+
+- Log: no independent log was found during this inspection.
+- Checkpoint / output: `/cs/research/vecg/EasyPDE/SAFE-SVD-v0/artifacts/vicon_r08/compressed_model.pth`; ranks at the adjacent `rank_dict.json`; run metadata at `run_config.json`; evaluation at `metrics_smoke.json`.
+- Submitted / started: not recorded.
+- Completed: compressed model mtime `2026-10-16 12:02:12`; smoke metrics mtime `2026-10-22 03:20:13` (remote filesystem time).
+- Last checked: `2026-10-22`.
+
+#### Results
+
+- Source: `artifacts/vicon_r08/{run_config.json,rank_dict.json,metrics_smoke.json}` and the research MySVD checkpoint/rank/CSV, checked `2026-10-22`.
+- Compression retained `70,311,680 / 87,823,104` total parameters and `70,119,168 / 87,630,592` Linear parameters (about 80%, i.e. about 20% reduction).
+- The source checkpoint is byte-identical to the research MySVD checkpoint: both SHA-256 values are `d0af2ed2f0e3eb935ed62dfad350f218b6fb927098ecd6db17d3dd2877eab91e`.
+- The selected ranks are not byte-identical: SAFE-SVD rank SHA-256 is `e93fe3ed5d44e00a6ba15186308ad9f363d2ef3462b9e58f88834e8707beef8a`, while research `cali2048_l1_trace/rank_0.8.json` is `3b05e359d2a1e95c7ae5d7725667b37d488d67af47e469f7d12027c0b8d16b91`.
+- The smoke evaluator did not feed origin and compressed models identical test time pairs. For example, the inferred COMPRESSIBLE2D label energy is about `1.891` for origin (`loss/relative_loss`) but `1.310` for compressed. Therefore the reported `-91.28%` loss change and other origin/compressed percentages are not trustworthy as paired-model comparisons.
+- The research CSV also persists and reuses an old origin row while its zero-worker iterable test datasets carry state across passes, so it is not a stable gold reference for cross-run comparison. A deterministic, cached test-batch replay is required before attributing remaining differences to compression.
 
 ### `poseidon_safe_seed1_r0.2`
 

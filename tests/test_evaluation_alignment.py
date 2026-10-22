@@ -153,6 +153,37 @@ class EvaluationAlignmentTest(unittest.TestCase):
             self.assertEqual([value.category for value in values], ["NS2D", "EULER2D"])
             self.assertEqual(float(values[0].payload[1][0][0, 0, 0, 0, 0]), traversal)
 
+    def test_vicon_paired_protocol_replays_samples_and_records_denominators(self):
+        datasets = {"NS2D": TimePairDataset("NS2D", [])}
+        bundle = ViconBundle(Path("VICON"), SimpleNamespace(datasets={}, dataset_workers=0, test_seed=84),
+                             TinyTrainer(), lambda *_: datasets, Path("data"), torch.device("cpu"))
+        with tempfile.TemporaryDirectory() as directory:
+            options = ViconEvaluationOptions(Path("VICON"), Path("model"), Path("data"),
+                                             Path("compressed"), Path(directory) / "metrics.json", "cpu",
+                                             batch_size=1, protocol="paired")
+            with patch("safesvd.adapters.vicon_runtime.load_vicon_bundle", return_value=bundle) as load, \
+                 patch("safesvd.adapters.vicon_runtime.load_compressed_state", side_effect=lambda model, _: model):
+                evaluate_vicon(options)
+            self.assertFalse(load.call_args_list[0].kwargs["explicit_attention"])
+            result = json.loads(options.output_path.read_text())
+        self.assertEqual(result["protocol"], "paired")
+        self.assertEqual(result["origin"]["metrics"], result["compressed"]["metrics"])
+        self.assertEqual(result["origin"]["metrics"]["label_energies"], {"NS2D": 6.5})
+        self.assertEqual(result["origin"]["metrics"]["loss_batches"], {"NS2D": 2})
+        self.assertEqual(datasets["NS2D"].iterations, 0)
+
+    def test_vicon_dataset_factory_supplies_rollout_config(self):
+        calls = []
+        def all_datasets(config, workers, seed, split, rollout_cfg):
+            calls.append((workers, seed, split, rollout_cfg))
+            return {}
+        bundle = ViconBundle(Path("VICON"), SimpleNamespace(datasets={}, dataset_workers=0, rollout="rollout"),
+                             TinyTrainer(), all_datasets, Path("data"), torch.device("cpu"))
+        batches = _vicon_batch_factory(bundle, split="test", batch_size=1, calibration_size=None,
+                                       seed=84, random_subset=False)
+        self.assertEqual(list(batches()), [])
+        self.assertEqual(calls, [(0, 84, "test", "rollout")])
+
     @unittest.skipIf(OmegaConf is None, "VICON path resolution requires omegaconf")
     def test_vicon_folder_rebasing_matches_main(self):
         with tempfile.TemporaryDirectory() as directory:

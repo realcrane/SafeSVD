@@ -32,7 +32,7 @@ class PublicInterfaceTest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(f"SAFE-SVD {model}/paper", result.stdout)
-            self.assertIn("--rank-selector safe", result.stdout)
+            self.assertIn("--rank-selector " + ("legacy" if model == "vicon" else "safe"), result.stdout)
             expected_route = f"safesvd.adapters.{model}_runner"
             self.assertIn(expected_route, result.stdout)
 

@@ -39,7 +39,7 @@ def replace_linear(
     left_factor = u[:, :rank] * root.unsqueeze(0)
     right_factor = root.unsqueeze(1) * vh[:rank]
     if factor_dtype is not None:
-        # Poseidon reference casts truncated factors before dewhitening.
+        # VICON/Poseidon references cast truncated factors before dewhitening.
         left_factor, right_factor = left_factor.to(factor_dtype), right_factor.to(factor_dtype)
     left_weight = left_inverse.to(left_factor.dtype) @ left_factor
     right_weight = right_factor @ right_inverse_transpose.T.to(right_factor.dtype)
@@ -195,7 +195,7 @@ def compress(
                     del right
                 del weight, left
                 replace_linear(student, name, original, matrix, rank, left_inverse, right_inverse_transpose,
-                               factor_dtype=torch.float32 if model_type == "poseidon" else None)
+                               factor_dtype=torch.float32 if model_type in {"poseidon", "vicon"} else None)
                 context.cache.pop(name, None)
                 del left_inverse, right_inverse_transpose, matrix
             done.add(name)

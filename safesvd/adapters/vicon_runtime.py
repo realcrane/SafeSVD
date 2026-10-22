@@ -3,12 +3,14 @@
 Only VICON-specific concerns are implemented here: loading its Hydra model,
 turning VICON batches into model calls, and computing its task/Fisher metrics.
 Whitening, rank selection, factorisation, and sequential replacement are all
-delegated to :mod:`safesvd.core` and ``common_runtime``.
+delegated to :mod:`safe_svd.main`, the research-aligned unified pipeline.
 """
 
 from __future__ import annotations
 
 import importlib
+import inspect
+import copy
 import json
 import os
 import random
@@ -24,17 +26,11 @@ import torch.nn.functional as functional
 from torch.utils.data import DataLoader, Subset
 
 from safesvd.adapters.common_runtime import (
-    CategoryAwareStatistics,
     TaggedBatch,
-    cache_tagged_batches,
     collect_fisher_whiteners,
-    collect_input_whiteners,
-    get_module_by_name,
     load_compressed_state,
     model_parameter_report,
     resolve_device,
-    save_portable_checkpoint,
-    set_module_by_name,
     write_json,
 )
 from safesvd.adapters.vicon_attention import (
@@ -43,7 +39,7 @@ from safesvd.adapters.vicon_attention import (
     patched_vicon_fisher_forward,
 )
 from safesvd.adapters.vicon_physics import SOBOLEV_ORDERS, average_metrics, physics_metrics
-from safesvd.core import CompressionCallbacks, allocate_ranks, compress_clean_input, compress_sequentially
+from safesvd.core import allocate_ranks
 
 
 @dataclass(frozen=True)
@@ -69,7 +65,7 @@ class ViconOptions:
     fisher_loss: str = "l1"
     balance_ratio: float = 10.0
     trace_balance: bool = True
-    random_calibration: bool = True
+    random_calibration: bool = False
     overwrite: bool = False
 
 
@@ -86,6 +82,7 @@ class ViconEvaluationOptions:
     config_overrides: tuple[str, ...] = ()
     batch_size: int = 128
     max_batches: int | None = None
+    protocol: str = "research"
 
 
 @dataclass
@@ -117,126 +114,51 @@ class ViconBundle:
 
 
 def run_vicon(options: ViconOptions) -> Path:
-    """Run VICON profile, Fisher/rank selection, and shared SAFE-SVD compression."""
+    """Use the same research-aligned pipeline as python -m safe_svd.main."""
+    from safe_svd.main import main as compress_vicon
+    from safe_svd.helper.collector.vicon_calibration_dataset import build_calibration_loaders
+
     _validate_options(options)
     bundle = load_vicon_bundle(
         options.vicon_root, options.model_path, options.data_path, options.device,
-        config_dir=options.config_dir, config_name=options.config_name, config_overrides=options.config_overrides,
+        config_dir=options.config_dir, config_name=options.config_name,
+        config_overrides=options.config_overrides,
+        explicit_attention=False,
     )
-    batch_factory = _vicon_batch_factory(
-        bundle,
-        split="train",
-        batch_size=options.batch_size,
-        calibration_size=options.calibration_size,
-        seed=options.calibration_seed,
-        random_subset=options.random_calibration,
-        source_dataset_workers=0,
+    datasets = _all_datasets(
+        bundle, 0,
+        _vicon_dataset_seed(bundle, "train", options.calibration_seed, options.random_calibration),
+        "train",
     )
-    trace_groups = {
-        name: SOBOLEV_ORDERS.get(name, 1)
-        for name in _dataset_names(
-            bundle,
-            "train",
-            options.calibration_seed,
-            random_subset=options.random_calibration,
-            source_dataset_workers=0,
-        )
-    }
-
-    profile = _load_or_collect(
-        options.profile_path,
-        options.overwrite,
-        lambda: collect_input_whiteners(
-            bundle.trainer.model, batch_factory, bundle_forward(bundle), device=bundle.device,
-            # VICON aligns profile covariances across every physical dataset.  Its
-            # Sobolev-order grouping is specific to the Fisher objective below.
-            trace_balance=options.trace_balance,
-        ),
+    loaders = build_calibration_loaders(
+        datasets, calibration_num=options.calibration_size, batch_size=options.batch_size,
+        num_workers=int(getattr(bundle.config, "dataset_workers", 0)),
+        random_calibration=options.random_calibration, calibration_seed=options.calibration_seed,
     )
-    fisher = None
-    if options.use_fisher:
-        fisher = _load_or_collect(
-            options.fisher_path,
-            options.overwrite,
-            lambda: _collect_vicon_fisher(bundle, batch_factory, options, trace_groups),
-        )
-    ranks = _load_or_select_ranks(options, bundle.trainer.model, fisher, profile)
-
-    options.save_path.mkdir(parents=True, exist_ok=True)
-    in_progress = options.save_path / "compressing_model.pt"
-    initial_student: nn.Module | None = None
-    compressed_layers: set[str] | None = None
-    if options.alpha != 0 and in_progress.is_file() and not options.overwrite:
-        partial = _torch_load(in_progress)
-        if isinstance(partial, Mapping) and isinstance(partial.get("model"), nn.Module):
-            initial_student = partial["model"]
-            compressed_layers = set(partial.get("compressed_layers", ()))
-            print(f"Resuming VICON compression after {len(compressed_layers)} layers", flush=True)
-
-    total_layers = sum(isinstance(module, nn.Linear) for module in bundle.trainer.model.modules())
-    checkpoint_every = max(1, total_layers // 10)
-
-    def checkpoint(student: nn.Module, done: set[str]) -> None:
-        torch.save({"model": student.cpu(), "compressed_layers": sorted(done)}, in_progress)
-        student.to(bundle.device)
-
-    compression_batches = cache_tagged_batches(batch_factory) if options.alpha != 0 else batch_factory
-    callbacks = CompressionCallbacks(
-        capture_inputs=lambda _model, _name: (),
-        get_module=get_module_by_name,
-        set_module=set_module_by_name,
-        checkpoint=checkpoint,
-        progress=_progress("VICON"),
-        capture_statistics=CategoryAwareStatistics(
-            compression_batches,
-            bundle_forward(bundle),
-            device=bundle.device,
-            trace_balance=options.trace_balance,
-        ),
+    compress_vicon(
+        bundle.trainer.model, loaders, model_type="vicon", trainer=bundle.trainer,
+        rank_ratio=options.rank_ratio, rank_selector=options.rank_selector,
+        device=bundle.device, alpha=options.alpha, compress_mode="comb",
+        use_fisher=options.use_fisher, gradient_loss=options.fisher_loss,
+        balance_ratio=options.balance_ratio, use_trace_balance=options.trace_balance,
+        calibration_seed=options.calibration_seed,
+        train_seed=int(getattr(bundle.config, "train_seed", 42)),
+        max_calib_batches=options.calibration_size // options.batch_size,
+        profile_cache=options.profile_path, fisher_cache=options.fisher_path,
+        rank_cache=options.rank_path, save_path=options.save_path,
+        overwrite_cache=options.overwrite,
     )
-    if options.alpha == 0:
-        compressed = compress_clean_input(
-            bundle.trainer.model, ranks, profile, callbacks, device=bundle.device, left_whiteners=fisher,
-        )
-    else:
-        compressed = compress_sequentially(
-            bundle.trainer.model,
-            ranks,
-            callbacks,
-            device=bundle.device,
-            alpha=options.alpha,
-            left_whiteners=fisher,
-            checkpoint_every=checkpoint_every,
-            initial_student=initial_student,
-            compressed_layers=compressed_layers,
-        )
-    output = save_portable_checkpoint(
-        options.save_path / "compressed_model.pth",
-        compressed,
-        model_name="vicon",
-        ranks=ranks,
-        metadata={
-            "source_root": str(options.vicon_root),
-            "config_dir": str(_config_dir(options)),
-            "config_name": options.config_name,
-            "checkpoint": str(options.model_path),
-            "data_root": str(options.data_path),
-            "alpha": options.alpha,
-            "rank_ratio": options.rank_ratio,
-            "rank_selector": options.rank_selector,
-        },
-    )
-    if in_progress.exists():
-        in_progress.unlink()
-    print(f"Compressed VICON model saved to {output}")
-    return output
+    return options.save_path / "compressed_model.pth"
 
 
 def evaluate_vicon(options: ViconEvaluationOptions) -> Path:
     """Evaluate VICON with the research script's shared test-dataset RNG stream."""
+    if options.protocol not in {"research", "paired"}:
+        raise ValueError("VICON evaluation protocol must be research or paired")
     bundle = load_vicon_bundle(
         options.vicon_root, options.model_path, options.data_path, options.device,
         config_dir=options.config_dir, config_name=options.config_name, config_overrides=options.config_overrides,
+        explicit_attention=False,
     )
     batch_factory = _vicon_batch_factory(
         bundle,
@@ -246,10 +168,16 @@ def evaluate_vicon(options: ViconEvaluationOptions) -> Path:
         seed=int(getattr(bundle.config, "test_seed", 0)),
         random_subset=False,
         max_batches=options.max_batches,
+        replay=options.protocol == "paired",
     )
     origin = _evaluate_vicon_model(bundle, bundle.trainer.model, batch_factory)
     payload: dict[str, Any] = {
         "model": "vicon",
+        "protocol": options.protocol,
+        "test_seed": int(getattr(bundle.config, "test_seed", 0)),
+        "batch_size": options.batch_size,
+        "max_batches": options.max_batches,
+        "config_overrides": list(options.config_overrides),
         "origin": {"model": str(options.model_path), "metrics": origin},
     }
     if options.compressed_path is not None:
@@ -284,6 +212,7 @@ def load_vicon_bundle(
     config_dir: Path | None = None,
     config_name: str = "default",
     config_overrides: tuple[str, ...] = (),
+    explicit_attention: bool = True,
 ) -> ViconBundle:
     """Load a VICON model/trainer without importing paper compression code."""
     package_root = find_vicon_package(root)
@@ -292,6 +221,8 @@ def load_vicon_bundle(
         sys.path.insert(0, str(parent))
     models = importlib.import_module("VICON.src.models")
     trainer_module = importlib.import_module("VICON.src.trainer")
+    target = resolve_device(device)
+    trainer_module.device = target
     dataset_module = importlib.import_module("VICON.src.dataset")
     config = _load_config(config_dir or package_root / "configs", config_name, config_overrides)
     _apply_data_root(config, data_root, config_overrides=config_overrides)
@@ -302,11 +233,12 @@ def load_vicon_bundle(
         model, config.model, config.opt, config.loss,
         trainable_mode=getattr(config, "trainable_mode", None),
     )
+    trainer.device = target
     state_dict = _checkpoint_state_dict(checkpoint)
     trainer.model.load_state_dict(state_dict)
-    convert_attn_to_linear(trainer.model)
-    disable_transformer_fast_path(trainer.model)
-    target = resolve_device(device)
+    if explicit_attention:
+        convert_attn_to_linear(trainer.model)
+        disable_transformer_fast_path(trainer.model)
     trainer.model.to(target).eval()
     return ViconBundle(package_root, config, trainer, dataset_module.all_datasets, data_root, target)
 
@@ -342,11 +274,12 @@ def _vicon_batch_factory(
     random_subset: bool,
     max_batches: int | None = None,
     source_dataset_workers: int | None = None,
+    replay: bool = False,
 ) -> Callable[[], Iterable[TaggedBatch]]:
     loader_workers = int(getattr(bundle.config, "dataset_workers", 0))
     dataset_workers = loader_workers if source_dataset_workers is None else source_dataset_workers
     dataset_seed = _vicon_dataset_seed(bundle, split, seed, random_subset)
-    datasets = bundle.all_datasets(bundle.config.datasets, dataset_workers, dataset_seed, split)
+    datasets = _all_datasets(bundle, dataset_workers, dataset_seed, split)
     randomizer = random.Random(seed)
     selected: dict[str, Any] = {}
     for category, dataset in datasets.items():
@@ -361,7 +294,7 @@ def _vicon_batch_factory(
         selected[category] = current
 
     def batches() -> Iterable[TaggedBatch]:
-        for category, dataset in selected.items():
+        for category, dataset in (copy.deepcopy(selected) if replay else selected).items():
             loader = DataLoader(dataset, batch_size=batch_size, num_workers=loader_workers, shuffle=False)
             limit = max_batches
             if limit is None and calibration_size is not None:
@@ -374,6 +307,14 @@ def _vicon_batch_factory(
                 yield TaggedBatch(str(category), batch)
 
     return batches
+
+
+def _all_datasets(bundle: ViconBundle, workers: int, seed: int, split: str) -> Mapping[str, Any]:
+    """Support both the research and vendored rollout-aware dataset API."""
+    kwargs = {}
+    if "rollout_cfg" in inspect.signature(bundle.all_datasets).parameters:
+        kwargs["rollout_cfg"] = bundle.config.rollout
+    return bundle.all_datasets(bundle.config.datasets, workers, seed, split, **kwargs)
 
 
 def _dataset_names(
@@ -532,9 +473,19 @@ def _evaluate_vicon_model(
             physical.setdefault(tagged.category, []).append(
                 physics_metrics(tagged.category, prediction_denormalized, target_denormalized)
             )
+    report = model_parameter_report(model)
+    # Count fused Q/K/V projections without changing the native origin forward.
+    report["linear_parameters"] += sum(
+        parameter.numel() for layer in model.modules() if isinstance(layer, nn.MultiheadAttention)
+        for name, parameter in layer.named_parameters(recurse=False)
+        if name in {"in_proj_weight", "in_proj_bias", "q_proj_weight", "k_proj_weight", "v_proj_weight"}
+    )
     return {
-        **model_parameter_report(model),
+        **report,
         "losses": {key: _mean(values) for key, values in losses.items()},
+        "label_energies": {key: _mean(values) for key, values in label_energies.items()},
+        "loss_batches": {key: len(values) for key, values in losses.items()},
+        "physics_batches": {key: len(values) for key, values in physical.items()},
         "relative_losses": {
             key: _mean(values) / (_mean(label_energies[key]) + 1e-12)
             for key, values in losses.items()

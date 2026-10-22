@@ -31,6 +31,7 @@ from safe_svd.helper.collector.fisher_collector import collect_fisher
 from safe_svd.helper.collector.vicon_attention import convert_attn_to_linear
 from safe_svd.rank import allocate_ranks
 from safe_svd.compress import compress
+from safe_svd.helper.collector import vicon_rng
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -208,6 +209,8 @@ def main(
             else:
                 Rdict = cached_profile  # Original MPP/VICON factors-only cache.
                 input_sample_counts = {}
+            if model_type == "vicon":
+                vicon_rng.restore(calibration_data, cached_profile.get("vicon_rng_state"))
             if verbose:
                 print(f"Loaded input cache: {profile_cache}")
         else:
@@ -235,7 +238,10 @@ def main(
             )
             if profile_cache is not None:
                 profile_cache.parent.mkdir(parents=True, exist_ok=True)
-                torch.save({"profile_mat": Rdict, "sample_counts": input_sample_counts}, profile_cache)
+                payload = {"profile_mat": Rdict, "sample_counts": input_sample_counts}
+                if model_type == "vicon":
+                    payload["vicon_rng_state"] = vicon_rng.capture(calibration_data)
+                torch.save(payload, profile_cache)
 
     # ===================================================================
     # 3. Fisher Collection: Ldict
@@ -247,6 +253,9 @@ def main(
         if use_fisher:
             if fisher_cache is not None and fisher_cache.is_file() and not overwrite_cache:
                 Ldict = torch.load(fisher_cache, map_location="cpu", weights_only=True)
+                if model_type == "vicon":
+                    vicon_rng.restore(calibration_data, Ldict.get("vicon_rng_state"))
+                    Ldict = Ldict["fisher_mat"]
                 if verbose:
                     print(f"Loaded Fisher cache: {fisher_cache}")
             else:
@@ -263,7 +272,9 @@ def main(
                 )
                 if fisher_cache is not None:
                     fisher_cache.parent.mkdir(parents=True, exist_ok=True)
-                    torch.save(Ldict, fisher_cache)
+                    payload = ({"fisher_mat": Ldict, "vicon_rng_state": vicon_rng.capture(calibration_data)}
+                               if model_type == "vicon" else Ldict)
+                    torch.save(payload, fisher_cache)
 
     # ===================================================================
     # 4. Rank Selection: rank_dict
@@ -321,10 +332,14 @@ def main(
         "max_calib_batches": max_calib_batches, "train_seed": train_seed,
         "calibration_size": len(calibration_data) if hasattr(calibration_data, "__len__") else None,
     }
+    if model_type == "vicon":
+        compression_config["vicon_alignment_version"] = 2
     if checkpoint_path is not None and checkpoint_path.is_file() and not overwrite_cache:
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         if not isinstance(checkpoint, dict) or "compressed_layers" not in checkpoint:
             raise ValueError(f"Invalid compression checkpoint: {checkpoint_path}")
+        if model_type == "vicon" and checkpoint.get("compression_config", {}).get("vicon_alignment_version") != 2:
+            raise ValueError("VICON checkpoint predates research alignment v2; use a new save_path")
         if "rank_dict" in checkpoint and checkpoint["rank_dict"] != rank_dict:
             raise ValueError("Checkpoint ranks differ from current ranks; use a new save_path or --overwrite_cache (Python: overwrite_cache=True)")
         if "compression_config" in checkpoint and checkpoint["compression_config"] != compression_config:
@@ -597,7 +612,13 @@ def resolve_cli_paths(args):
     dataset_tag = args.dataset if args.model_type == "poseidon" else args.model_type
     input_tag = f"{calibration_tag}_{trace_tag}_{whitening_tag}"
     if args.model_type == "vicon":
-        input_tag = f"vicon_research_v1_{input_tag}"
+        # A new namespace prevents reuse of pre-alignment statistics/ranks.
+        stat = args.ckpt_path.stat() if args.ckpt_path.is_file() else None
+        identity = (str(args.ckpt_path), stat.st_size if stat else None,
+                    stat.st_mtime_ns if stat else None, str(args.data_root),
+                    str(args.config_dir), args.config_name, args.config_override, args.dataset_workers)
+        digest = hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:12]
+        input_tag = f"vicon_research_v2_{digest}_{input_tag}"
     if args.batch_size is not None:
         input_tag += f"_bs{args.batch_size}"
     fisher_tag = f"{input_tag}_{args.gradient_loss}_br{args.balance_ratio}_decay{args.decay_alpha}"
@@ -810,6 +831,8 @@ def cli_main(argv=None):
         "compression_checkpoint_exists_before_run": (args.save_path / "compressing_model.pt").is_file(),
         "compression_dtype": "float32" if args.compression_backend == "low-gpu" else "float64",
         "poseidon_factor_dtype": "float32" if args.model_type == "poseidon" else None,
+        "vicon_alignment_version": 2 if args.model_type == "vicon" else None,
+        "vicon_factor_dtype": "float32" if args.model_type == "vicon" else None,
         "capture_cache_device": "cpu",
     }
     run_config_path.write_text(json.dumps(run_config, indent=2) + "\n")

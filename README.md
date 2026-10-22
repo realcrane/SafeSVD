@@ -369,6 +369,46 @@ use the same entry point. MPP/VICON default to `--rank_selector legacy` and
 Poseidon to `safe`; `--rank_selector safe` selects the shared strict-budget
 allocator for any model.
 
+## VICON research alignment
+
+Both `python -m safe_svd.main --model vicon` and `python -m safesvd.cli compress
+--model vicon` use the same compression implementation. For the original MySVD
+route, use `legacy` ranks, fixed calibration (`random_calibration=n`), batch size
+128, alpha 0.7, L1 Fisher with balance ratio 10, and trace alignment enabled.
+These are VICON CLI defaults; the public CLI still requires `--calibration-size`
+(use 2048 to match the research run). `safe` remains an explicit alternative.
+Input/Fisher Gram accumulation and float32 dewhitening match the research code;
+alpha zero still uses the sequential comb algorithm.
+
+New automatically generated caches and default outputs are isolated from older
+VICON runs (`vicon_research_v2` or a versioned cache-key hash). Caches preserve
+calibration RNG state so cold and warm runs consume the same subsequent data.
+Old caches lacking that state require recomputation. Old models are not modified:
+compression changes require a new run and a new output directory. Explicit
+output/cache paths remain the caller's responsibility.
+
+Evaluate a newly compressed checkpoint with:
+
+```bash
+python -m safesvd.cli evaluate --model vicon \
+  --checkpoint ./models/VICON/model.pth --data-root /path/to/vicon_data \
+  --compressed-model /path/to/new_run/compressed_model.pth \
+  --output /path/to/new_run/metrics_research.json -- --protocol research
+```
+
+The default `research` protocol follows a fresh research evaluation: native
+origin loss → origin physics → compressed loss → compressed physics, advancing
+the same test dataset RNG stream (test seed 84, batch size 128). It does **not**
+reuse historical CSV baselines. Historical CSVs may have skipped earlier models,
+so their samples cannot necessarily be reconstructed from the seed alone.
+
+For identical time-pair samples across models and metric passes, use
+`-- --protocol paired` and a separate `metrics_paired.json` output. JSON records
+the protocol, test seed, batch limits, label energies and per-dataset batch
+counts. `paired` is a controlled comparison, not the original advancing-stream
+protocol. Linear parameter counts include native fused Q/K/V projections without
+converting the origin model's forward pass.
+
 ## Poseidon compression
 
 Place the unmodified upstream Poseidon checkout at `poseidon/`, downstream data

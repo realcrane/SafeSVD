@@ -81,7 +81,7 @@ class VICONAdapter(Adapter):
         return env
 
     def source_root(self, request: RunRequest | EvaluationRequest) -> Path:
-        return (request.config.source_root or Path(os.environ.get("SAFE_SVD_VICON_ROOT", request.repo_root / "vicon"))).expanduser().resolve()
+        return (request.config.source_root or Path(os.environ.get("SAFE_SVD_VICON_ROOT", request.repo_root / "VICON"))).expanduser().resolve()
 
     def _package_root(self, request: RunRequest | EvaluationRequest) -> Path:
         source = self.source_root(request)
@@ -97,6 +97,7 @@ def _cache_key(request: RunRequest, source_root: Path) -> str:
     checkpoint = request.assets.resolved_model_path
     stat = checkpoint.stat() if checkpoint.exists() else None
     fields = (
+        "vicon_research_v2",
         str(checkpoint), str(stat.st_size if stat else ""), str(stat.st_mtime_ns if stat else ""),
         str(request.assets.resolved_data_root), str(source_root), str(request.config.calibration_size),
         str(request.config.calibration_seed), str(request.config.rank_ratio), str(request.config.alpha),

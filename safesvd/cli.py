@@ -25,14 +25,14 @@ def parser() -> argparse.ArgumentParser:
     compress_parser.add_argument(
         "--source-root",
         type=Path,
-        help="External source checkout for the selected backend (defaults to ./poseidon, ./vicon, or ./mpp).",
+        help="Source checkout for the backend (defaults to ./poseidon, bundled ./VICON, or ./mpp).",
     )
     compress_parser.add_argument("--rank-ratio", type=float, required=True)
     compress_parser.add_argument(
         "--rank-selector",
         choices=("safe", "legacy"),
-        default="safe",
-        help="Rank allocator: budget-consistent SAFE-SVD (default) or the MySVD-compatible legacy route.",
+        default=None,
+        help="Rank allocator (default: legacy for VICON, safe otherwise).",
     )
     compress_parser.add_argument("--calibration-size", type=int, required=True)
     compress_parser.add_argument(
@@ -209,11 +209,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command != "compress":
         raise AssertionError(f"Unhandled command: {args.command}")
+    if args.rank_selector is None:
+        args.rank_selector = "legacy" if args.model == "vicon" else "safe"
     extra = tuple(args.extra[1:] if args.extra[:1] == ["--"] else args.extra)
     _validate_backend_extra(args.model, extra, evaluation=False)
     calibration_seed = args.calibration_seed
     if calibration_seed is None:
-        calibration_seed = -1 if args.model == "poseidon" else 42
+        calibration_seed = {"poseidon": -1, "vicon": 2026, "mpp": 42}[args.model]
     args.calibration_seed = calibration_seed
     if args.model == "poseidon" and calibration_seed < -1:
         raise ValueError("Poseidon --calibration-seed must be -1 or a non-negative integer.")

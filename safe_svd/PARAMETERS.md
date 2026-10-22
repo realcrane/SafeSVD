@@ -95,7 +95,9 @@ low-gpu 会改变 compression 的数值精度，并增加 CPU 内存与传输开
 Poseidon 自动生成的 Fisher/rank 缓存路径包含 `_fbs8` 等 Fisher batch 标签，避免调整批大小后误读另一批大小生成的结果；这会使历史默认路径不再自动命中。历史缓存保留原文件，确认兼容后可以显式指定。
 Poseidon Fisher/rank 路径还包含 `_derivonly`，隔离旧零阶损失产生的缓存。旧入口生成的 Fisher 和由其生成的 rank 应重新计算；显式指定缓存路径时不会检查其损失定义。
 缓存路径没有完整 checkpoint/配置内容哈希；调用者必须保证复用的是同一模型、数据和采样设置的兼容缓存。
-VICON 使用随仓库维护的 research 版本，默认缓存标签含 `vicon_research_v1`，避免自动复用此前其他 VICON 版本的缓存；显式缓存路径仍需自行确认兼容性。
+VICON 使用随仓库维护的 research 版本，默认缓存标签含 `vicon_research_v2`，并包含 checkpoint 路径/大小/mtime、数据根目录及配置选项的指纹。不同 selector 的 rank 和默认模型输出路径分开。旧缓存不删除，也不自动复用。
+VICON Input/Fisher 缓存还保存各阶段结束时的全局 RNG、dataset RNG 和文件顺序；加载缓存时恢复这些状态，避免缓存命中改变后续 calibration 数据。Fisher 文件现在包含 `fisher_mat` 和 `vicon_rng_state`。没有 RNG 状态的历史 Input/Fisher 缓存不能直接恢复，应选择新缓存目录重算。仅传入旧 rank JSON 仍可固定原 rank。
+VICON 的 batch size、worker 数、数据顺序必须保持一致；不要像 Poseidon 那样降低 batch size 后显式复用 VICON 缓存。此机制不支持 `persistent_workers=True`，也不校验数据文件内容。
 
 CLI 在输出目录保存 `run_config.json`，记录完整命令参数、解析后的路径、缓存在运行前是否存在、Torch 版本及 checkpoint config 的 SHA-256；成功后补充 rank JSON 的 SHA-256。config 哈希不能证明权重文件相同，缓存存在记录也不能证明缓存生成时的参数；这些信息不能替代一致性检查。
 
@@ -104,6 +106,7 @@ CLI 在输出目录保存 `run_config.json`，记录完整命令参数、解析�
 断点和最终模型均先写临时文件再替换正式文件；保存失败保留上一份完整断点。最终模型和 rank_dict.json 保存成功后删除 compressing_model.pt。Input/Fisher/Rank 仍按阶段缓存，不提供采集到一半的 batch 级恢复。
 
 Poseidon reconstruction 还遵循参考实现的 float32 精度策略：`origin` 的 Cholesky 因子/逆先以 float32 构造，随后转换成 compute_dtype；SVD 截断后的因子在逆变换前转为 float32。GPU 模式的协方差和 SVD 仍使用 float64。
+VICON 同样在 SVD 截断后、反白化前把两个因子转为 float32，与 MySVD `comb_compress.py` 一致。`alpha=0` 默认仍走 comb，而不是改走静态 Input 缓存分解。
 
 ## 7. Python main() 接口
 

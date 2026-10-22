@@ -23,7 +23,7 @@ def parser() -> argparse.ArgumentParser:
     compress.add_argument("--fisher-path", type=Path, required=True)
     compress.add_argument("--rank-path", type=Path, required=True)
     compress.add_argument("--rank-ratio", type=float, required=True)
-    compress.add_argument("--rank-selector", choices=("safe", "legacy"), default="safe")
+    compress.add_argument("--rank-selector", choices=("safe", "legacy"), default="legacy")
     compress.add_argument("--calibration-size", type=int, required=True)
     compress.add_argument("--calibration-seed", type=int, required=True)
     compress.add_argument("--alpha", type=float, required=True)
@@ -31,7 +31,7 @@ def parser() -> argparse.ArgumentParser:
     compress.add_argument("--fisher-loss", choices=("l1", "mse", "smooth_l1"), default="l1")
     compress.add_argument("--balance-ratio", type=float, default=10.0)
     compress.add_argument("--trace-balance", choices=("y", "n"), default="y")
-    compress.add_argument("--random-calibration", choices=("y", "n"), default="y")
+    compress.add_argument("--random-calibration", choices=("y", "n"), default="n")
     compress.add_argument("--overwrite", action="store_true")
 
     evaluate = commands.add_parser("evaluate", help="evaluate original and compressed VICON models")
@@ -39,6 +39,8 @@ def parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--compressed-path", type=Path)
     evaluate.add_argument("--output-path", type=Path, required=True)
     evaluate.add_argument("--max-batches", type=int)
+    evaluate.add_argument("--protocol", choices=("research", "paired"), default="research",
+                          help="Research: four advancing passes; paired: replay identical test samples per pass.")
     return result
 
 
@@ -100,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
         compressed_path=args.compressed_path.expanduser().resolve() if args.compressed_path else None,
         output_path=args.output_path.expanduser().resolve(),
         max_batches=args.max_batches,
+        protocol=args.protocol,
     ))
     print(output)
     return 0
