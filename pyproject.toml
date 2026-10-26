@@ -16,4 +16,5 @@ safe-svd-unified = "safe_svd.main:cli_main"
 include = ["safesvd*", "safe_svd*", "VICON*"]
 
 [tool.setuptools.package-data]
-VICON = ["configs/*.yaml", "configs/*/*.yaml", "LICENSE", "VENDORED.md"]
+safe_svd = ["configs/*.yaml"]
+VICON = ["configs/*.yaml", "configs/*/*.yaml", "configs/*.json", "LICENSE", "VENDORED.md"]

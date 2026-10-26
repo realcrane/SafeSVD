@@ -384,12 +384,12 @@ of the original greedy rank allocation.
 For the root-level source checkout and YAML containing relative `2D/...` paths:
 
 ```bash
-python -m safe_svd.main --model mpp \
-  --yaml_config ./multiple_physics_pretraining/config/mpp_avit_L_config.yaml \
+env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python -m safe_svd.main --model mpp \
+  --yaml_config ./safe_svd/configs/mpp_avit_L_config.yaml \
   --config basic_config \
   --ckpt_path /absolute/path/to/MPP_AViT_L \
   --data_root ./data/raw_data \
-  --rank_ratio 0.4 --rank_selector legacy \
+  --rank_ratio 0.8 --rank_selector legacy \
   --calibration_num 16 --calibration_seed 42 --batch_size 1 \
   --alpha 0.7 --use_fisher y --gradient_loss l1 \
   --balance_ratio 10 --decay_alpha 1 --use_trace_balance y
@@ -399,8 +399,21 @@ Replace the checkpoint placeholder with a readable file; a broken download
 symlink is not repaired automatically. Both source layouts are auto-detected;
 the nested layout is preferred when both contain `models/avit.py`. Calibration
 loads only the training dataset and uses the original per-file batch limit.
+The maintained YAML enables `gradient_checkpointing`, with batch size 1,
+16 context steps and AMP disabled, matching the verified research configuration.
+An explicitly supplied YAML takes precedence; check the effective settings
+printed at startup. Increasing batch size increases the forward/backward memory
+requirement. `calibration_num=16` is retained when using batch size 1.
 
-Automatically generated cache/rank paths use a new `mpp_research_v2` namespace
+The CLI runs rank selection and compression in separate processes, matching
+the research wrapper and releasing collection memory before compression.
+MPP Fisher accumulates and balances category covariances in FP32, then converts
+the merged covariance to FP64 for whitening. The calibration seed fixes each
+file's shuffle; the original training-mode Fisher also uses stochastic DropPath,
+so exact independent-run comparisons require matching the global RNG state
+at Fisher entry, not just the calibration seed.
+
+Automatically generated cache/rank paths use a new `mpp_research_v3` namespace
 or a versioned hash. Default compressed-model paths separate rank selectors.
 Old compression checkpoints cannot be resumed under the new numerical policy;
 use a new output directory. Existing files are not deleted. Explicit cache and
@@ -609,23 +622,40 @@ The output JSON records aggregate and
 per-dataset physical metrics; `--max-batches` is useful for a quick smoke
 test.
 
+Use `python evaluation/<model>/evaluate.py` for all three models. Common
+arguments are `--checkpoint` (original weights), `--model` (optional compressed
+weights), `--data-root`, `--output`, and `--device`.
+
 ```bash
-python -m safesvd.cli evaluate \
-  --model vicon \
-  --source-root . \
+python evaluation/poseidon/evaluate.py \
+  --poseidon-root ./poseidon \
+  --checkpoint models/poseidon/fluids.incompressible.PiecewiseConstants \
+  --model artifacts/poseidon/0.2/traj64_ft20/compressed_model.pt \
+  --data-root poseidon/camlab-ethz/down_streams \
+  --output artifacts/poseidon/0.2/traj64_ft20/metrics.json
+
+python evaluation/vicon/evaluate.py \
+  --vicon-root ./VICON \
   --checkpoint ./models/VICON/model.pth \
-  --compressed-model artifacts/vicon/paper/<run>/compressed/compressed_model.pth \
+  --model artifacts/vicon/paper/<run>/compressed/compressed_model.pth \
   --data-root /datasets/vicon \
   --max-batches 10
 
-python -m safesvd.cli evaluate \
-  --model mpp \
-  --source-root ./mpp \
+python evaluation/mpp/evaluate.py \
+  --mpp-root ./multiple_physics_pretraining \
   --checkpoint ./models/MPP/MPP_AViT_L \
-  --compressed-model artifacts/mpp/paper/<run>/compressed/compressed_model.pt \
+  --model artifacts/mpp/paper/<run>/compressed/compressed_model.pt \
   --data-root /datasets/mpp \
   --max-batches 10
 ```
+
+VICON and MPP call the same research-aligned implementation as the existing
+`safesvd.cli evaluate` compatibility entry. Their default output follows
+Poseidon's convention: `<run>/metrics.json` for a checkpoint in a `compressed/`
+directory, otherwise `<checkpoint-parent>/evaluation/<model>/metrics.json`.
+These entries evaluate the requested checkpoint pair and write JSON; the
+original research scripts' method sweeps and historical CSV result caches
+are not used.
 
 ViCON reports its upstream masked MSE and relative loss plus task-specific
 Sobolev and, where applicable, incompressible-flow divergence and vorticity
@@ -643,7 +673,7 @@ For VICON, `--data-root` contains `2D_Train_Rand`, `2D_Train_Turb`, and
 `NavierStokes-2D-conditoned`. Dataset `folder` paths are resolved below this
 root; legacy absolute paths and paths containing `..` use their basename.
 Explicit `--config-override datasets.types.<name>.folder=...` values take
-precedence (pass backend options after `--`).
+precedence; pass these options directly to `evaluation/vicon/evaluate.py`.
 
 <!-- SAFE-SVD is a unified, reproducible interface for applying SVD-based
 compression to three scientific foundation models:

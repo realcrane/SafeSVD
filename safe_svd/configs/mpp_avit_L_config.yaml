@@ -1,0 +1,122 @@
+# Research MPP AViT-L defaults; paths are relative to --data_root.
+basic_config: &basic_config
+  # Run settings
+  log_to_wandb: !!bool True
+  log_to_screen: !!bool True
+  save_checkpoint: !!bool True
+  checkpoint_save_interval: 10
+  debug_grad: !!bool True
+  true_time: !!bool False
+  num_data_workers: 6
+  enable_amp: !!bool False
+  compile: !!bool False
+  gradient_checkpointing: !!bool True
+  exp_dir: '~/MPP'
+  log_interval: 1
+  pretrained: !!bool False
+
+  # WandB settings
+  project: 'project'
+  group: 'debugging'
+  entity: 'entity'
+
+  # Training settings
+  drop_path: 0.1
+  batch_size: 1
+  max_epochs: 500
+  scheduler_epochs: -1
+  epoch_size: 2000
+  rescale_gradients: !!bool False
+  optimizer: 'adan'
+  scheduler: 'cosine'
+  warmup_steps: 1000
+  learning_rate: -1
+  weight_decay: 1e-3
+  n_states: 12
+  state_names:
+    - 'Pressure'
+    - 'Vx'
+    - 'Vy'
+    - 'Density'
+    - 'Vx'
+    - 'Vy'
+    - 'Density'
+    - 'Pressure'
+  dt: 1
+  n_steps: 16
+  enforce_max_steps: !!bool False
+  accum_grad: 5
+
+  # Model settings
+  model_type: 'avit'
+  block_type: 'axial'
+  time_type: 'attention'
+  space_type: 'axial_attention'
+  tie_fields: !!bool False
+  embed_dim: 1024
+  num_heads: 16
+  processor_blocks: 24
+  patch_size: [16, 16]
+  bias_type: 'rel'
+
+  # Data settings
+  train_val_test: [0.8, 0.1, 0.1]
+  augmentation: !!bool False
+  use_all_fields: !!bool True
+  tie_batches: !!bool False
+  extended_names: !!bool False
+  embedding_offset: 0
+
+  # Paths are relative to --data_root.
+  # With --data_root data/raw_data:
+  # 2D/shallow-water -> data/raw_data/2D/shallow-water
+  train_data_paths:
+    - ['2D/shallow-water', 'swe', '']
+    - ['2D/NS_incom', 'incompNS', '']
+    - ['2D/CFD/2D_Train_Rand', 'compNS', '128']
+    - ['2D/CFD/2D_Train_Rand', 'compNS', '512']
+    - ['2D/CFD/2D_Train_Turb', 'compNS', '']
+    - ['2D/diffusion-reaction', 'diffre2d', '']
+
+  valid_data_paths:
+    - ['2D/shallow-water', 'swe', '']
+    - ['2D/NS_incom', 'incompNS', '']
+    - ['2D/CFD/2D_Train_Rand', 'compNS', '128']
+    - ['2D/CFD/2D_Train_Rand', 'compNS', '512']
+    - ['2D/CFD/2D_Train_Turb', 'compNS', '']
+    - ['2D/diffusion-reaction', 'diffre2d', '']
+
+  append_datasets: []
+
+
+finetune: &finetune
+  <<: *basic_config
+  max_epochs: 500
+  train_val_test: [0.8, 0.1, 0.1]
+  accum_grad: 1
+  pretrained: !!bool True
+  group: 'debugging'
+  pretrained_ckpt_path: '/B16-noNS/training_checkpoints/ckpt.tar'
+
+  train_data_paths:
+    - ['2D/CFD/2D_Train_Turb', 'compNS', 'M1.0']
+
+  valid_data_paths:
+    - ['2D/CFD/2D_Train_Turb', 'compNS', 'M1.0']
+
+  embedding_offset: 0
+  freeze_middle: !!bool False
+  freeze_processor: !!bool False
+  append_datasets: []
+
+
+frozen: &frozen
+  <<: *finetune
+  freeze_middle: !!bool True
+  freeze_processor: !!bool False
+
+
+less_frozen: &less_frozen
+  <<: *finetune
+  freeze_middle: !!bool True
+  freeze_processor: !!bool True

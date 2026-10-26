@@ -73,7 +73,12 @@ def allocate_greedy_ranks(
             left = torch.eye(out_features, device=target, dtype=weight.dtype)
         singular_values = torch.linalg.svdvals((left @ weight) @ right)
         scale = _energy_scale(name, energy_scales)
-        pool.extend((float(value.square() * scale / cost), name, index, cost) for index, value in enumerate(singular_values))
+        # The research selector squares Python floats. Tensor.square() can
+        # round a near-tied score one ULP differently and change the winning
+        # layer at the budget boundary. Preserve its arithmetic and stable
+        # tie ordering; scale is one for MPP/VICON.
+        pool.extend(((value.item() ** 2) * scale / cost, name, index, cost)
+                    for index, value in enumerate(singular_values))
 
     pool.sort(key=lambda item: item[0], reverse=True)
     budget = int(total_original * rank_ratio)

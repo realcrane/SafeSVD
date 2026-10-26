@@ -2,6 +2,7 @@
 
 统一入口：`python -m safe_svd.main --model mpp|vicon|poseidon ...`。
 运行顺序是模型/数据加载 → Input Profiling → Fisher Collection → Rank Selection → Compression → 保存。
+VICON 的 CLI `--pipeline_stage all` 分别启动 `rank_selection` 和 `compression` 子进程；第二个进程重新加载模型与校准数据，读取第一个进程生成的统计和 rank 缓存。这对应 2026-10-23 服务器原版 `MySVD/safe_svd.py` 调用 `rank.py`、`mysvd.py` 的阶段边界。
 所有压缩和采集 helper 都在本仓库；模型定义与基础数据读取使用本仓库内安装的官方源码。
 
 ## 1. 压缩与 rank selection
@@ -13,7 +14,7 @@
 | `--rank_selector` | MPP/VICON `legacy`；Poseidon `safe` | `legacy` 保留原贪心分配规则，补最低 rank 时可能超预算；`safe` 预先计入最低 rank 成本，并用动态贪心分配保证预算。输出 `None` 表示保留原层。 |
 | `--alpha` | `0.7` | `comb` 中当前 student 输入修正的权重，范围 `[0,1]`。输入度量是 `(1-alpha) HᵀH + alpha HpᵀHp`，交叉项是 `(1-alpha) HᵀH + alpha HᵀHp`；H/Hp 是对应 teacher/student 的输入。`0` 使用 teacher 输入，增大后更重视对当前 student 输入的适配。`clean_input` 中不参与计算。 |
 | `--compress_mode` | `comb` | `comb` 逐层采集 teacher/当前 student 的对应输入，再做低秩替换；`clean_input` 使用 Step 1 的原始模型输入度量，不重新采集 student 输入。两者都使用所选 rank 和可选 Fisher 左度量。 |
-| `--use_fisher` | `y` | `y` 收集/加载 Fisher 左度量 L，在 rank selection 和 compression 中使用；`n` 跳过 Fisher，用单位左度量。这里的 Fisher 是 **Linear 输出梯度的协方差**，不是完整参数 Fisher 矩阵。 |
+| `--use_fisher` | `y` | `y` 收集/加载 Fisher 左度量 L，在 rank selection 和 compression 中使用；`n` 在 compression 中用单位左度量。VICON 保留原版 rank.py 行为，rank selection 仍收集/使用 Fisher；MPP/Poseidon 的 n 跳过 Fisher。这里的 Fisher 是 **Linear 输出梯度的协方差**，不是完整参数 Fisher 矩阵。 |
 | `--use_trace_balance` / `--use_trace_align` | MPP/VICON `y`；Poseidon `n` | 对类别协方差按 trace 对齐后取类别均值，减弱类别量级差异。影响 Input、Fisher 和 `comb` 的统计；VICON Fisher 按 Sobolev 阶数分组对齐。关闭时 MPP/Poseidon 按展开后的特征行数加权，VICON 按类别等权。 |
 
 ## 2. Fisher 损失
@@ -26,7 +27,7 @@
 | `--order_control` | `2` | **Poseidon** 最大空间差分阶数，非负整数。与 MySVD_fast 一致，只附加一阶及以上空间差分损失；`0` 只保留模型 base loss。MPP/VICON 根据数据类别确定阶数，不使用此 CLI 值：MPP incompNS/diffre2d 为 2、compNS/swe 为 1；VICON NS2D 为 2、COMPRESSIBLE2D/EULER2D 为 1。 |
 
 当前 Poseidon Fisher 没有传入 `prev_pred/prev_labels`，因此只附加空间差分物理项，不额外计算时间差分损失。
-`use_fisher=n` 时，上述 Fisher 损失参数都不参与计算。
+`use_fisher=n` 时，MPP/Poseidon 不计算上述 Fisher 损失；VICON 的 rank selection 仍使用它们。
 
 ## 3. Whitening
 
@@ -42,18 +43,18 @@
 | --- | --- | --- |
 | `--calibration_num` | MPP `16`；VICON `2048` | MPP 每个文件、VICON 每个类别的目标采样数。MPP 每文件最多 `ceil(calibration_num / batch_size)` 个完整 batch，DataLoader 设置 drop_last=True；VICON 每类别最多 `floor(calibration_num / batch_size)` 个完整 batch，要求至少一个 batch。不是 Poseidon 的采样参数。 |
 | `--traj_num` | `64` | Poseidon 完整训练轨迹数，不是样本数或 batch 大小。一条轨迹可能生成多个时间对，最终 dataset 长度通常大于 traj_num。 |
-| `--calibration_seed` | MPP `42`；VICON `2026`；Poseidon `default` | MPP 每个文件 shuffle 的种子。VICON 在 random_calibration=y 时用于随机校准。Poseidon `default` 取训练集前 traj_num 条；非负整数（包括 `0`）表示无放回随机选择完整轨迹。 |
-| `--random_calibration` | `n` | VICON 专用，是否启用按 calibration_seed 随机选择；默认保持原校准流程。固定流程的数据构造使用 cfg.train_seed。 |
+| `--calibration_seed` | MPP `42`；VICON `42`；Poseidon `default` | MPP 每个文件 shuffle 的种子。VICON 在 random_calibration=y 时用于 map-style 随机子集，并作为流式数据集的 base_seed 传入；研究版 train 流式数据实际从全局 NumPy RNG 取种子，忽略 base_seed，因此此值不能单独固定其采样序列。Poseidon `default` 取训练集前 traj_num 条；非负整数（包括 `0`）表示无放回随机选择完整轨迹。 |
+| `--random_calibration` | `n` | VICON 专用，保持服务器原版 wrapper 默认的固定校准流程；数据构造使用 cfg.train_seed。y 启用 helper 的随机选择分支，但对研究版流式数据集不意味着 calibration_seed 能控制所有随机性。 |
 | `--final_time` | `20` | Poseidon 非椭圆数据的 `max_num_time_steps`，并设置 time_step_size=1；不是训练轮数，也不保证等于物理时间单位。椭圆数据不传该参数。 |
-| `--batch_size` | MPP：YAML；VICON `128`；Poseidon `256` | MPP/VICON 的实际 DataLoader batch 大小，影响各采集阶段。Poseidon 是 Trainer 的 profiling/rollout batch 大小，**不控制 Fisher backward**。Poseidon 压缩时一个 capture slice 还可能被 Trainer 拆成更小 batch。 |
+| `--batch_size` | MPP：YAML；VICON `64`；Poseidon `256` | MPP/VICON 的实际 DataLoader batch 大小，影响各采集阶段。VICON 与 2026-10-23 服务器原版 rank.py、mysvd.py 的固定 batch 大小一致。Poseidon 是 Trainer 的 profiling/rollout batch 大小，**不控制 Fisher backward**。Poseidon 压缩时一个 capture slice 还可能被 Trainer 拆成更小 batch。 |
 | `--fisher_batch_size` | `16` | Poseidon Fisher 前向/反向每批样本数。MPP/VICON 使用自己的 batch_size，不使用此项。 |
 | `--capture_batch_size` | `64` | Poseidon compression 每次传给采集 rollout 的数据切片大小，按 dataset **样本**计，不是轨迹。实际一次前向通常不超过它与 Trainer batch_size 的较小值。MPP/VICON 不使用此项。 |
 | `--dataset_workers` | VICON：cfg.dataset_workers | VICON 校准 DataLoader 工作进程数，非负整数。MPP 使用 params.num_data_workers；当前 Poseidon profiling、Fisher 和 capture 使用 0 worker。 |
 | `--DEV` / `--device` | `cuda` | 计算设备，例如 cuda、cuda:0、cpu。选择模型、统计和 SVD 的执行设备。 |
 | `--compression_backend` | `GPU` | `GPU` 的 **compression** 统计和分解使用 float64；`low-gpu` 的 compression 使用 float32。**两种模式的 Poseidon 捕获参数和复用缓存都默认放 CPU**，与 safesvd 的采集策略一致。teacher/student 模型仍在指定设备；不会把整个算法改成 CPU。此参数不改变模型权重 dtype、Input/Fisher 精度设置，也不改变 rank selection 的 float64 计算。 |
 
-显存排查时先降低 `batch_size`、`capture_batch_size`，使用 `compression_backend=low-gpu`。
-只有 Fisher 阶段 OOM 才需要先降低 fisher_batch_size。不要把减少 traj_num 当成减少单次前向 batch 的同义操作。
+MPP/VICON 的 Fisher 显存由 `batch_size` 控制；Poseidon 使用 `fisher_batch_size`。MPP 固定 calibration_num=16 时可用 batch_size=1，逐批完成采样；若已经是 1，先核对 YAML 的 `gradient_checkpointing=True`（与研究配置一致）。不能通过增大 batch 来降低单次前向/反向显存。
+Poseidon compression 可降低 `batch_size`、`capture_batch_size`；`compression_backend=low-gpu` 只改变压缩阶段，不解决 Fisher 前向 OOM。不要把减少 traj_num 当成减少单次前向 batch 的同义操作。
 low-gpu 会改变 compression 的数值精度，并增加 CPU 内存与传输开销；不能保证任意模型都能装进指定 GPU。
 
 ## 5. 模型、数据和配置路径
@@ -63,12 +64,13 @@ low-gpu 会改变 compression 的数值精度，并增加 CPU 内存与传输开
 | CLI 参数 | 默认值 | 定义 |
 | --- | --- | --- |
 | `--ckpt_path` / `--model_path` | MPP：models/MPP/MPP_AViT_L；VICON：models/VICON/model.pth；Poseidon：models/poseidon/数据集名称 | MPP/VICON 为 checkpoint 文件；Poseidon 为包含 config.json 与权重的具体目录。所有默认路径均相对于本仓库。 |
-| `--data_root` / `--data_path` | MPP：优先已存在的 data/raw_data，否则 data/official/mpp；VICON：data/VICON；Poseidon：poseidon/camlab-ethz/down_streams | 数据根目录。MPP YAML 的相对数据条目拼在此目录下，绝对条目（含展开后的 ~）保持自身位置。VICON 自动重定位 folder/path/data_path；显式 config_override 的目录优先。Poseidon 传给官方 get_dataset。 |
-| `--yaml_config` | 优先 data/official/configs/mpp_avit_L.yaml，否则官方 MPP config/mpp_avit_L_config.yaml | MPP 架构和数据路径配置。 |
+| `--data_root` / `--data_path` | MPP：优先已存在的 data/raw_data，否则 data/official/mpp；VICON：data/VICON，缺失时回退到已存在的 data/processed_data/2D/CFD/converted；Poseidon：poseidon/camlab-ethz/down_streams | 数据根目录。MPP YAML 的相对数据条目拼在此目录下，绝对条目（含展开后的 ~）保持自身位置。VICON 自动重定位 folder/path/data_path；显式 config_override 的目录优先。Poseidon 传给官方 get_dataset。 |
+| `--yaml_config` | 优先 data/official/configs/mpp_avit_L.yaml，否则本仓库 safe_svd/configs/mpp_avit_L_config.yaml（gradient_checkpointing=True） | MPP 架构和数据路径配置。 |
 | `--config` | `basic_config` | MPP YAML 中读取的配置段名。 |
 | `--config_dir` | 本仓库 VICON/configs/ | 随仓库维护的旧实验版 VICON Hydra 配置目录，默认 model.type=crop。 |
 | `--config_name` | `default` | VICON Hydra 主配置名。 |
 | `--config_override` | 空列表 | 可重复传入 Hydra KEY=VALUE，例如 datasets.types.NS2D.folder=/data/NS。模型架构的覆盖值必须与 checkpoint 一致。 |
+| `--vicon_file_order` | 本仓库 VICON/configs/research_calibration_order.json | VICON train 文件初始枚举清单，记录 2026-10-23 参考服务器的实际顺序。可指定另一份同格式清单；`filesystem` 保留当前目录枚举顺序，此模式不保证与研究采样顺序对齐。 |
 | `--dataset` | `fluids.incompressible.PiecewiseConstants` | Poseidon 官方数据集注册名称，同时用于物理通道规则及缓存目录。须与数据和 checkpoint 的任务一致。 |
 | `--model_name` | `Poseidon-L` | Poseidon **缓存目录标签**。实际模型结构来自 checkpoint 的 config.json，不由这个参数创建。 |
 | `--use_phyloss` | `no_phyloss` | 原命令兼容参数；当前入口不读取它，不改变加载的 checkpoint、不启用/关闭 Fisher 物理损失。要选择权重用 model_path；要关闭物理项用 balance_ratio=0。 |
@@ -78,10 +80,10 @@ low-gpu 会改变 compression 的数值精度，并增加 CPU 内存与传输开
 
 | CLI 参数 | 默认值 | 定义 |
 | --- | --- | --- |
-| `--pipeline_stage` | `all` | all 执行四阶段并保存；rank_selection 执行 Input、Fisher、Rank 后停止；compression 加载已有 Input/Fisher/Rank 缓存，只重新执行压缩。compression 仍会加载模型与校准数据；use_fisher=n 时不要求 Fisher 缓存。 |
-| `--profile_cache` | cache_dir/input/设置标签/profiling_mat.pt | Input 的 Rdict 和 sample_counts 缓存。存在时读取，否则采集并保存。 |
-| `--fisher_cache` | cache_dir/fisher/设置标签/Ldict.pt | Fisher 的 (L, L⁻¹) 缓存。 |
-| `--rank_cache` / `--rank_path` | rank_root/设置标签/rank_比例.json | 每层 rank 字典缓存，None 在 JSON 中为 null。 |
+| `--pipeline_stage` | `all` | all 执行四阶段并保存；MPP/VICON CLI 将其拆成独立的 rank_selection、compression 子进程。rank_selection 执行 Input、Fisher、Rank 后停止；compression 加载已有 Input/Fisher/Rank 缓存，只重新执行压缩。compression 仍会加载模型与校准数据；use_fisher=n 时不要求 Fisher 缓存。 |
+| `--profile_cache` | cache_dir/input/设置标签/profiling_mat.pt | Input 的 Rdict 和 sample_counts 缓存；MPP/VICON 另存对应的 alignment_version=3，不保存 RNG。存在时读取，否则采集并保存；VICON 也兼容显式提供的原版纯因子字典。 |
+| `--fisher_cache` | cache_dir/fisher/设置标签/Ldict.pt | Fisher 的 (L, L⁻¹) 缓存；MPP/VICON v3 保存 fisher_mat 和版本字段，不保存 RNG。 |
+| `--rank_cache` / `--rank_path` | rank_root/设置标签/rank_比例.json | 每层 rank 字典缓存，None 在 JSON 中为 null。VICON rank_selection 与原版 rank.py 一样重新分配并写入该文件；compression 读取已有 rank。 |
 | `--cache_dir` | 本仓库 artifacts/cache/数据集或模型/模型标签 | 自动生成的 Input/Fisher 缓存根目录；显式 profile_cache/fisher_cache 优先。 |
 | `--rank_root` | 本仓库 artifacts/ranks/数据集或模型/模型标签 | 自动生成的 rank 缓存根目录；显式 rank_cache 优先。 |
 | `--save_path` | 本仓库 artifacts/compressed/数据集或模型/模型标签/比例/设置标签 | 输出目录。MPP/Poseidon 保存完整 nn.Module 到 compressed_model.pt；VICON 保存 state_dict 到 compressed_model.pth；三者都保存 rank_dict.json。 |
@@ -95,25 +97,31 @@ low-gpu 会改变 compression 的数值精度，并增加 CPU 内存与传输开
 Poseidon 自动生成的 Fisher/rank 缓存路径包含 `_fbs8` 等 Fisher batch 标签，避免调整批大小后误读另一批大小生成的结果；这会使历史默认路径不再自动命中。历史缓存保留原文件，确认兼容后可以显式指定。
 Poseidon Fisher/rank 路径还包含 `_derivonly`，隔离旧零阶损失产生的缓存。旧入口生成的 Fisher 和由其生成的 rank 应重新计算；显式指定缓存路径时不会检查其损失定义。
 缓存路径没有完整 checkpoint 权重/数据内容哈希；调用者必须保证复用的是同一模型、数据和采样设置的兼容缓存。
-MPP 自动检测 `mpp/multiple_physics_pretraining/` 或根目录 `multiple_physics_pretraining/` 中的完整源码；两者都存在时优先前者。统一入口默认缓存标签含 `mpp_research_v2`，指纹包含 checkpoint 路径/大小/mtime、数据与源码根目录、YAML 路径/内容及配置名称。不同 selector 的 rank 和默认模型输出路径分开。旧缓存不删除也不自动复用；旧版本的压缩断点不能续跑，应使用新的 save_path。显式缓存路径仍需调用者检查兼容性。
-VICON 使用随仓库维护的 research 版本，默认缓存标签含 `vicon_research_v2`，并包含 checkpoint 路径/大小/mtime、数据根目录及配置选项的指纹。不同 selector 的 rank 和默认模型输出路径分开。旧缓存不删除，也不自动复用。
-VICON Input/Fisher 缓存还保存各阶段结束时的全局 RNG、dataset RNG 和文件顺序；加载缓存时恢复这些状态，避免缓存命中改变后续 calibration 数据。Fisher 文件现在包含 `fisher_mat` 和 `vicon_rng_state`。没有 RNG 状态的历史 Input/Fisher 缓存不能直接恢复，应选择新缓存目录重算。仅传入旧 rank JSON 仍可固定原 rank。
-VICON 的 batch size、worker 数、数据顺序必须保持一致；不要像 Poseidon 那样降低 batch size 后显式复用 VICON 缓存。此机制不支持 `persistent_workers=True`，也不校验数据文件内容。
+MPP 自动检测 `mpp/multiple_physics_pretraining/` 或根目录 `multiple_physics_pretraining/` 中的完整源码；两者都存在时优先前者。统一入口默认缓存标签含 `mpp_research_v3`，指纹包含 checkpoint 路径/大小/mtime、数据与源码根目录、MPP 源码内容、YAML 路径/内容及配置名称。不同 selector 的 rank 和默认模型输出路径分开。旧缓存不删除也不自动复用；旧版本的压缩断点不能续跑，应使用新的 save_path。MPP 的旧结构化统计缓存会被拒绝；显式提供的研究版纯因子字典仍需调用者检查来源和兼容性。
+VICON 使用随仓库维护的 research 版本，默认缓存标签为 `vicon_research_v3`。默认 cache key 包含 checkpoint 路径/大小/mtime、数据根目录、配置选项、配置文件内容哈希及文件顺序指纹；不同 selector 的 rank 和默认模型输出路径分开。旧缓存和模型保留原文件，新的对照运行应使用独立输出目录，例如 `artifacts/vicon_r08_research_v3`。
 
-CLI 在输出目录保存 `run_config.json`，记录完整命令参数、解析后的路径、缓存在运行前是否存在、Torch 版本及 checkpoint config 的 SHA-256；成功后补充 rank JSON 的 SHA-256。config 哈希不能证明权重文件相同，缓存存在记录也不能证明缓存生成时的参数；这些信息不能替代一致性检查。
+VICON Input/Fisher 统计缓存保存因子和版本元数据（Input 另有 sample_counts），不保存 RNG；加载时与原版一样不恢复 profiling/Fisher 结束后的全局 RNG、dataset RNG 或文件顺序。旧 v1/v2 的结构化统计缓存会被拒绝，需选择新的缓存目录重算。显式指定的原版纯因子字典可以读取，但其格式不包含生成参数证明，调用者必须先核对 checkpoint、数据、batch、采样、损失、trace 和 rank 的来源。compression-only 可通过旧 rank JSON 固定 rank，不能据此认定统计或压缩样本一致。
 
-压缩断点保存已完成层名、rank 和压缩设置，以及当前 student。MPP/Poseidon 使用完整模型；VICON 保存 state_dict，恢复时根据已完成层及 rank 重建低秩结构。恢复不保存激活缓存，后续层需要的输入会按当前 student 重新采集。模型权重、数据和采样必须与原运行一致；断点会检查已记录的设置与 rank，但不校验全部权重或数据文件内容。可降低 batch_size/capture_batch_size，改变压缩 dtype/alpha/whitening 等设置会报错。
+文件顺序清单在 train 数据集第一次迭代前重排本地 `dataset.dp`，路径相对各类别 folder，不读取原版目录或代码。类别及其顺序、文件集合必须匹配；绝对路径、重复项和缺失文件会报错。清单保留原研究枚举顺序，随后仍由原 dataset RNG 做 shuffle。它只证明文件名和顺序匹配，不证明 HDF5 内容、数据划分或历史采样一致。VICON 的 batch size、worker 数和数据顺序必须保持一致；不要通过降低 batch size 后显式复用旧缓存来声称复现。
+
+原版仅在实际执行 Input Profiling 时重置 `cfg.train_seed`；统计缓存命中时会跳过这一步。研究版 train 流式 dataset 从全局 NumPy RNG 生成自己的种子，忽略传入的 base_seed。因此，即使参数、清单和缓存相同，历史原版 compression 进程也可能使用未记录的随机状态。两个子进程和不恢复 RNG 的统计缓存复现其执行逻辑，不保证重新生成历史压缩权重的相同字节，也不构成端到端指标等价验证。
+
+CLI 在输出目录保存 `run_config.json`，记录完整命令参数、解析后的路径、缓存在运行前是否存在、Torch 版本及 checkpoint config 的 SHA-256；VICON 参数中还记录文件顺序清单的 SHA-256，MPP/VICON 的 rank_selection 阶段单独写入 `rank_run_config.json`。成功后补充 rank JSON 的 SHA-256。config 哈希不能证明权重文件相同，缓存存在记录也不能证明缓存生成时的参数；这些信息不能替代一致性检查。
+
+压缩断点保存已完成层名、rank 和压缩设置，以及当前 student。MPP/Poseidon 使用完整模型；VICON 保存 state_dict，恢复时根据已完成层及 rank 重建低秩结构。恢复不保存激活缓存，后续层需要的输入会按当前 student 重新采集。VICON v3 断点另存 compression 预取校准 batch 前的 RNG 与文件顺序状态；恢复后重新预取同一批样本。这是断点恢复状态，与不恢复 RNG 的 Input/Fisher 统计缓存不同。VICON 旧版本断点不能用于 v3 续跑；保持 batch size、worker、数据及采样设置不变。模型权重、数据和采样必须与原运行一致；断点检查已记录的设置与 rank，但不校验全部权重或数据文件内容。Poseidon 可降低 batch_size/capture_batch_size；改变压缩 dtype/alpha/whitening 等设置会报错。
 
 断点和最终模型均先写临时文件再替换正式文件；保存失败保留上一份完整断点。最终模型和 rank_dict.json 保存成功后删除 compressing_model.pt。Input/Fisher/Rank 仍按阶段缓存，不提供采集到一半的 batch 级恢复。
 
 Poseidon reconstruction 还遵循参考实现的 float32 精度策略：`origin` 的 Cholesky 因子/逆先以 float32 构造，随后转换成 compute_dtype；SVD 截断后的因子在逆变换前转为 float32。GPU 模式的协方差和 SVD 仍使用 float64。
 VICON 同样在 SVD 截断后、反白化前把两个因子转为 float32，与 MySVD `comb_compress.py` 一致。`alpha=0` 默认仍走 comb，而不是改走静态 Input 缓存分解。
+MPP Fisher 的类别均值、trace 平衡与合并先使用 FP32，合并后转 FP64；这与先转 FP64 再合并不同。calibration_seed 只固定每文件采样顺序，原版 train 模式下 DropPath 还依赖全局 Torch RNG，严格对照需要对齐 Fisher 入口的 RNG 状态。
 MPP 也在 SVD 截断后、反白化前把因子转为 float32，与原 MySVD 一致；`safesvd.cli compress` 和统一入口现在共用同一条 MPP 压缩流程，alpha=0 仍走 comb。MPP 评估器兼容统一入口保存的完整 nn.Module 和历史 portable state_dict；请只加载可信来源的 checkpoint。
 
 ## 7. Python main() 接口
 
 `main(model, calibration_data, *, ...)` 接受已经加载好的模型与数据。以上同名算法参数仍适用；它不负责通过 traj_num 等 CLI 参数重新选择数据。
 它直接返回 CPU 上的 compressed nn.Module；pipeline_stage=rank_selection 时返回 None。
+Python API 不创建子进程，也不重新构造模型或 DataLoader。VICON `pipeline_stage=all` 在入口记录 loader 和全局 RNG 状态，并在 compression 前恢复，避免继续消费 rank selection 已推进的数据流；需要原 wrapper 的独立进程边界时使用 CLI。
 
 | Python 参数 | 默认值 | 定义/与 CLI 的区别 |
 | --- | --- | --- |
@@ -147,8 +155,10 @@ MPP 也在 SVD 截断后、反白化前把因子转为 float32，与原 MySVD �
 | `checkpoint_percent` | `0.1` | 与 CLI 相同的逐层保存与自动续跑。只有提供 save_path 时写断点；overwrite_cache=True 忽略旧断点。 |
 | `save_path` | `None` | API 默认只返回模型、不保存；CLI 默认生成输出目录。 |
 | `overwrite_cache` | `False` | 同 CLI。 |
+| `overwrite_output` | `False` | 只忽略压缩断点并允许替换最终输出，仍读取已有统计缓存；CLI 两阶段调度在重算统计后内部使用。 |
+| `run_provenance` | `None` | VICON 断点保存并比较的来源信息。CLI 自动填入 checkpoint 路径/大小/mtime、配置内容哈希、数据根目录和文件顺序清单信息；Python 调用者可提供同类信息。VICON 另校验统计缓存的路径/大小/mtime。均不代替完整数据/权重内容校验。 |
 | `verbose` | `True` | 阶段/缓存日志及 Fisher、compression 的 tqdm 进度；False 关闭这两个进度条，Poseidon 官方 Input rollout 的进度由 Trainer 控制。 |
-| `pipeline_stage` | `all` | 同 CLI。 |
+| `pipeline_stage` | `all` | 执行所选阶段；VICON all 在 compression 前恢复入口 loader/global RNG 状态，不采用 CLI 的子进程调度。 |
 | `perf_csv_path` | `None` | 显式阶段性能 CSV 文件，CLI gpu_profile 自动设为 save_path/gpu_profile.csv。 |
 
 ## 8. 进度条单位

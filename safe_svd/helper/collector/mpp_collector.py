@@ -13,7 +13,7 @@ def iter_mpp_batches(dataset, device, options):
     if params is None:
         raise ValueError("MPP route_options requires params")
     limit = options.get("batches_per_dset", 16)
-    if limit is not None and limit < 1:
+    if limit is not None and limit <= 0:
         raise ValueError("batches_per_dset must be positive or None")
     seed = options.get("calibration_seed", 42)
     for group in dataset.sub_dsets:

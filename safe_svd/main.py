@@ -14,6 +14,9 @@ import gc
 import hashlib
 import inspect
 import json
+import os
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -32,6 +35,7 @@ from safe_svd.helper.collector.vicon_attention import convert_attn_to_linear
 from safe_svd.rank import allocate_ranks
 from safe_svd.compress import compress
 from safe_svd.helper.collector import vicon_rng
+from safe_svd.helper.collector.vicon_file_order import apply_vicon_file_order
 from safesvd.adapters.mpp_paths import default_mpp_package
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -75,6 +79,8 @@ def main(
     rank_cache=None,
     save_path=None,
     overwrite_cache=False,
+    overwrite_output=False,
+    run_provenance=None,
     checkpoint_percent=0.1,
     verbose=True,
     pipeline_stage="all",
@@ -92,8 +98,15 @@ def main(
     Final saving follows the originals: MPP/Poseidon save a complete model;
     VICON saves its state_dict plus rank_dict.json for the low-rank topology.
     With save_path, checkpoint every checkpoint_percent of Linear layers.
-    Resume automatically from compressing_model.pt unless overwrite_cache=True.
+    Resume automatically unless overwrite_cache/overwrite_output is True.
     Completed profiling/Fisher/rank caches are reused.
+
+    MPP and VICON CLI runs use separate rank/compression processes, as in
+    their research wrappers. Python API calls remain in the calling process.
+    VICON statistics cache hits do not advance the calibration stream. For
+    an in-process all-stage call, compression replays the entry RNG/loader
+    state. The CLI runs rank selection and compression in separate processes,
+    matching the research wrapper's independently initialized loaders.
     """
     # ===================================================================
     # 0. Configuration
@@ -139,7 +152,7 @@ def main(
     if save_path is not None:
         filename = "compressed_model.pth" if model_type == "vicon" else "compressed_model.pt"
         final_path = save_path / filename
-        if pipeline_stage != "rank_selection" and final_path.exists() and not overwrite_cache:
+        if pipeline_stage != "rank_selection" and final_path.exists() and not (overwrite_cache or overwrite_output):
             raise FileExistsError(f"Model already exists: {final_path}; choose a new save_path or overwrite_cache=True")
 
     if pipeline_stage == "compression":
@@ -195,6 +208,7 @@ def main(
     route_options["balance_ratio"] = balance_ratio
     route_options["decay_alpha"] = decay_alpha
     model = model.to(dev).eval()
+    vicon_compression_rng = vicon_rng.capture(calibration_data) if model_type == "vicon" else None
 
     # ===================================================================
     # 2. Input Profiling: Rdict and input_sample_counts
@@ -204,14 +218,16 @@ def main(
     with perf.stage("input_collection"):
         if profile_cache is not None and profile_cache.is_file() and not overwrite_cache:
             cached_profile = torch.load(profile_cache, map_location="cpu", weights_only=True)
+            if model_type == "vicon":
+                _validate_vicon_statistics_cache(cached_profile, "profile_mat")
+            elif model_type == "mpp":
+                _validate_mpp_statistics_cache(cached_profile, "profile_mat")
             if "profile_mat" in cached_profile:
                 Rdict = cached_profile["profile_mat"]
                 input_sample_counts = cached_profile["sample_counts"]
             else:
                 Rdict = cached_profile  # Original MPP/VICON factors-only cache.
                 input_sample_counts = {}
-            if model_type == "vicon":
-                vicon_rng.restore(calibration_data, cached_profile.get("vicon_rng_state"))
             if verbose:
                 print(f"Loaded input cache: {profile_cache}")
         else:
@@ -241,7 +257,9 @@ def main(
                 profile_cache.parent.mkdir(parents=True, exist_ok=True)
                 payload = {"profile_mat": Rdict, "sample_counts": input_sample_counts}
                 if model_type == "vicon":
-                    payload["vicon_rng_state"] = vicon_rng.capture(calibration_data)
+                    payload["vicon_alignment_version"] = 3
+                elif model_type == "mpp":
+                    payload["mpp_alignment_version"] = 3
                 torch.save(payload, profile_cache)
 
     # ===================================================================
@@ -251,12 +269,17 @@ def main(
         print("==== Step 2: Fisher Collection ====", flush=True)
     with perf.stage("fisher_collection"):
         Ldict = None
-        if use_fisher:
+        # rank.py always collects/uses Fisher, even when mysvd.py is asked to
+        # disable Fisher during compression.
+        if use_fisher or (model_type == "vicon" and pipeline_stage != "compression"):
             if fisher_cache is not None and fisher_cache.is_file() and not overwrite_cache:
                 Ldict = torch.load(fisher_cache, map_location="cpu", weights_only=True)
                 if model_type == "vicon":
-                    vicon_rng.restore(calibration_data, Ldict.get("vicon_rng_state"))
-                    Ldict = Ldict["fisher_mat"]
+                    _validate_vicon_statistics_cache(Ldict, "fisher_mat")
+                    Ldict = Ldict.get("fisher_mat", Ldict)
+                elif model_type == "mpp":
+                    _validate_mpp_statistics_cache(Ldict, "fisher_mat")
+                    Ldict = Ldict.get("fisher_mat", Ldict)
                 if verbose:
                     print(f"Loaded Fisher cache: {fisher_cache}")
             else:
@@ -273,8 +296,10 @@ def main(
                 )
                 if fisher_cache is not None:
                     fisher_cache.parent.mkdir(parents=True, exist_ok=True)
-                    payload = ({"fisher_mat": Ldict, "vicon_rng_state": vicon_rng.capture(calibration_data)}
+                    payload = ({"fisher_mat": Ldict, "vicon_alignment_version": 3}
                                if model_type == "vicon" else Ldict)
+                    if model_type == "mpp":
+                        payload = {"fisher_mat": Ldict, "mpp_alignment_version": 3}
                     torch.save(payload, fisher_cache)
 
     # ===================================================================
@@ -283,7 +308,8 @@ def main(
     if verbose:
         print("==== Step 3: Rank Selection ====", flush=True)
     with perf.stage("rank_selection"):
-        if rank_cache is not None and rank_cache.is_file() and not overwrite_cache:
+        if (rank_cache is not None and rank_cache.is_file() and not overwrite_cache
+                and not (model_type == "vicon" and pipeline_stage == "rank_selection")):
             rank_dict = json.loads(rank_cache.read_text())
             if verbose:
                 print(f"Loaded rank cache: {rank_cache}")
@@ -334,17 +360,30 @@ def main(
         "calibration_size": len(calibration_data) if hasattr(calibration_data, "__len__") else None,
     }
     if model_type == "vicon":
-        compression_config["vicon_alignment_version"] = 2
+        compression_config["vicon_alignment_version"] = 3
+        compression_config["run_provenance"] = run_provenance
+        compression_config["statistics_files"] = {
+            name: _file_identity(path) for name, path in
+            (("profile", profile_cache), ("fisher", fisher_cache if use_fisher else None))
+        }
     if model_type == "mpp":
-        compression_config["mpp_alignment_version"] = 2
-    if checkpoint_path is not None and checkpoint_path.is_file() and not overwrite_cache:
+        compression_config["mpp_alignment_version"] = 3
+        compression_config["effective_mpp_config"] = _effective_mpp_config(params)
+        compression_config["run_provenance"] = run_provenance
+        compression_config["statistics_files"] = {
+            name: _file_identity(path) for name, path in
+            (("profile", profile_cache), ("fisher", fisher_cache if use_fisher else None))
+        }
+    if checkpoint_path is not None and checkpoint_path.is_file() and not (overwrite_cache or overwrite_output):
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         if not isinstance(checkpoint, dict) or "compressed_layers" not in checkpoint:
             raise ValueError(f"Invalid compression checkpoint: {checkpoint_path}")
-        if model_type == "vicon" and checkpoint.get("compression_config", {}).get("vicon_alignment_version") != 2:
-            raise ValueError("VICON checkpoint predates research alignment v2; use a new save_path")
-        if model_type == "mpp" and checkpoint.get("compression_config", {}).get("mpp_alignment_version") != 2:
-            raise ValueError("MPP checkpoint predates research alignment v2; use a new save_path")
+        if model_type == "vicon":
+            if checkpoint.get("compression_config", {}).get("vicon_alignment_version") != 3:
+                raise ValueError("VICON checkpoint predates research alignment v3; use a new save_path")
+            vicon_compression_rng = checkpoint.get("vicon_compression_rng")
+        if model_type == "mpp" and checkpoint.get("compression_config", {}).get("mpp_alignment_version") != 3:
+            raise ValueError("MPP checkpoint predates research alignment v3; use a new save_path")
         if "rank_dict" in checkpoint and checkpoint["rank_dict"] != rank_dict:
             raise ValueError("Checkpoint ranks differ from current ranks; use a new save_path or --overwrite_cache (Python: overwrite_cache=True)")
         if "compression_config" in checkpoint and checkpoint["compression_config"] != compression_config:
@@ -388,6 +427,7 @@ def main(
             }
             if model_type == "vicon":
                 checkpoint["model_state_dict"] = student.state_dict()
+                checkpoint["vicon_compression_rng"] = vicon_compression_rng
             else:
                 checkpoint["model"] = student
             torch.save(checkpoint, temporary)
@@ -400,6 +440,10 @@ def main(
 
     if checkpoint_path is not None and verbose:
         print(f"Checkpoint every {checkpoint_every} layers ({checkpoint_percent:.0%}): {checkpoint_path}", flush=True)
+    if model_type == "vicon":
+        # Restore after rebuilding a resumed student's Linear layers, which
+        # consume torch RNG. Prefetch must see the original compression stream.
+        vicon_rng.restore(calibration_data, vicon_compression_rng)
     with perf.stage("compression"):
         compressed_model = compress(
             model,
@@ -408,7 +452,7 @@ def main(
             model_type=model_type,
             device=dev,
             route_options=route_options,
-            left_metrics=Ldict,
+            left_metrics=Ldict if use_fisher else None,
             input_metrics=Rdict,
             alpha=alpha,
             mode="clean" if compress_mode == "clean_input" else "combined",
@@ -451,12 +495,48 @@ def main(
 run_safe_svd = main
 
 
+def _file_identity(path):
+    if path is None:
+        return None
+    path = Path(path).resolve()
+    stat = path.stat() if path.is_file() else None
+    return {"path": str(path), "size": stat.st_size if stat else None,
+            "mtime_ns": stat.st_mtime_ns if stat else None}
+
+
+def _validate_vicon_statistics_cache(payload, factor_key):
+    # Explicit original factor-only dictionaries remain usable. Older SAFE
+    # wrappers used a different stage stream and must be recomputed.
+    structured = any(key in payload for key in
+                     ("profile_mat", "fisher_mat", "vicon_rng_state", "vicon_alignment_version"))
+    if structured and (payload.get("vicon_alignment_version") != 3 or factor_key not in payload):
+        raise ValueError("VICON statistics cache predates research alignment v3; "
+                         "use a fresh cache directory or --overwrite_cache")
+
+
+def _validate_mpp_statistics_cache(payload, factor_key):
+    # Raw research factor dictionaries remain usable for explicit comparisons.
+    # Structured SAFE caches must use the original FP32 Fisher reduction order.
+    structured = any(key in payload for key in
+                     ("profile_mat", "fisher_mat", "mpp_alignment_version"))
+    if structured and (payload.get("mpp_alignment_version") != 3 or factor_key not in payload):
+        raise ValueError("MPP statistics cache predates research alignment v3; "
+                         "use a fresh cache directory or --overwrite_cache")
+
+
+def _effective_mpp_config(params):
+    values = dict(getattr(params, "params", vars(params)))
+    values = {key: getattr(params, key, value) for key, value in values.items()
+              if not key.startswith("_") and not callable(value)}
+    return json.loads(json.dumps(values, default=str))
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Unified SAFE-SVD: load -> input -> Fisher -> rank -> compress",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Model defaults: MPP ratio=0.4, samples=16, seed=42, selector=legacy;\n"
-               "VICON ratio=0.8, samples=2048, seed=2026, selector=legacy;\n"
+               "VICON ratio=0.8, samples=2048, seed=42, batch=64, selector=legacy;\n"
                "Poseidon ratio=0.2, trajectories=64, seed=default, selector=safe.\n"
                "Full parameter definitions and memory guidance: safe_svd/PARAMETERS.md",
     )
@@ -469,7 +549,7 @@ def parse_args(argv=None):
     parser.add_argument("--rank_ratio", type=float, help="Retained Linear weight budget fraction in (0,1], not per-layer rank")
     parser.add_argument("--rank_selector", choices=("legacy", "safe"), help="Original greedy or strict-budget greedy allocation")
     parser.add_argument("--alpha", type=float, default=0.7, help="Student-input correction weight in comb mode, [0,1] (default: 0.7)")
-    parser.add_argument("--use_fisher", choices=("y", "n"), default="y", help="Use Fisher left metrics in rank/compression (default: y)")
+    parser.add_argument("--use_fisher", choices=("y", "n"), default="y", help="Use Fisher left metrics (VICON rank selection always uses Fisher; default: y)")
     parser.add_argument("--fisher_loss", "--gradient_loss", dest="gradient_loss", choices=("l1", "mse", "smooth_l1"), default="l1",
                         help="Physical/Sobolev error function; base model loss is unchanged (default: l1)")
     parser.add_argument("--balance_ratio", type=float, default=10.0, help="Physical loss strength relative to base loss (default: 10)")
@@ -487,7 +567,7 @@ def parse_args(argv=None):
                         help="Regularizer scale (Poseidon new: sum_equivalent; others: absolute)")
     parser.add_argument("--calibration_seed", default=None, metavar="default|SEED",
                         help="Sampling seed; Poseidon default selects fixed prefix, integer selects random trajectories")
-    parser.add_argument("--batch_size", type=int, help="MPP YAML batch override; VICON default 128; Poseidon inference default 256")
+    parser.add_argument("--batch_size", type=int, help="MPP YAML batch override; VICON default 64; Poseidon inference default 256")
     parser.add_argument("--fisher_batch_size", type=int, default=8, help="Poseidon backward batch size (default: 16)")
     parser.add_argument("--capture_batch_size", type=int, default=8, help="Poseidon compression capture slice size in examples, not trajectories (default: 64)")
     parser.add_argument("--pipeline_stage", choices=("all", "rank_selection", "compression"), default="all",
@@ -499,6 +579,7 @@ def parse_args(argv=None):
     parser.add_argument("--rank_root", type=Path, help="Root for generated rank caches")
     parser.add_argument("--save_path", type=Path, help="Output directory for compressed model and rank_dict.json")
     parser.add_argument("--overwrite_cache", action="store_true", help="Recompute caches, ignore compression checkpoint and allow replacing final output")
+    parser.add_argument("--_overwrite_output", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--checkpoint_percent", type=float, default=0.1,
                         help="Save compression checkpoint every fraction of Linear layers, in (0,1] (default: 0.1)")
     parser.add_argument("--dry_run", action="store_true", help="Print paths/configuration without importing model runtimes or loading assets")
@@ -515,6 +596,7 @@ def parse_args(argv=None):
     parser.add_argument("--random_calibration", choices=("y", "n"), default="n", help="VICON seeded random calibration selection (default: n)")
     parser.add_argument("--rank_type", default="MySVD_Rank", choices=("MySVD_Rank",), help="VICON cache label; algorithm is chosen by rank_selector")
     parser.add_argument("--dataset_workers", type=int, help="VICON calibration DataLoader workers (default: cfg.dataset_workers)")
+    parser.add_argument("--vicon_file_order", help="VICON file-order manifest (default: bundled research_calibration_order.json); filesystem uses native enumeration")
 
     # Poseidon arguments, retaining SAFE_SVD/safe_svd.py's trajectory semantics.
     parser.add_argument("--model_name", default="Poseidon-L", help="Poseidon cache label; architecture comes from checkpoint (default: Poseidon-L)")
@@ -544,7 +626,7 @@ def parse_args(argv=None):
     if args.use_trace_balance is None:
         args.use_trace_balance = "n" if args.model_type == "poseidon" else "y"
     if args.calibration_seed is None:
-        args.calibration_seed = {"mpp": 42, "vicon": 2026, "poseidon": None}[args.model_type]
+        args.calibration_seed = {"mpp": 42, "vicon": 42, "poseidon": None}[args.model_type]
     elif args.calibration_seed == "default":
         if args.model_type != "poseidon":
             parser.error("calibration_seed=default is only supported by Poseidon")
@@ -564,13 +646,15 @@ def parse_args(argv=None):
         parser.error("Calibration sizes and final_time must be positive")
     if args.batch_size is not None and args.batch_size <= 0:
         parser.error("batch_size must be positive")
+    if args.model_type == "vicon" and args.batch_size is None:
+        args.batch_size = 64
     if args.fisher_batch_size <= 0 or args.capture_batch_size <= 0:
         parser.error("fisher_batch_size and capture_batch_size must be positive")
     if args.dataset_workers is not None and args.dataset_workers < 0:
         parser.error("dataset_workers must be non-negative")
     if args.model_type == "mpp" and args.gradient_loss == "smooth_l1":
         parser.error("MPP original Fisher supports l1 or mse")
-    if args.model_type == "vicon" and args.calibration_num < (args.batch_size or 128):
+    if args.model_type == "vicon" and args.calibration_num < args.batch_size:
         parser.error("VICON calibration_num must be at least batch_size")
     if args.eps_whiten <= 0 or args.order_control < 0:
         parser.error("whitening_eps must be positive and order_control non-negative")
@@ -583,7 +667,8 @@ def resolve_cli_paths(args):
     if args.model_type == "mpp":
         args.runtime_root = default_mpp_package(PROJECT_ROOT)
         prepared_config = PROJECT_ROOT / "data/official/configs/mpp_avit_L.yaml"
-        default_config = prepared_config if prepared_config.is_file() else args.runtime_root / "config/mpp_avit_L_config.yaml"
+        default_config = (prepared_config if prepared_config.is_file()
+                          else PROJECT_ROOT / "safe_svd/configs/mpp_avit_L_config.yaml")
         default_checkpoint = PROJECT_ROOT / "models/MPP/MPP_AViT_L"
         default_data = (PROJECT_ROOT / "data/raw_data" if (PROJECT_ROOT / "data/raw_data").is_dir()
                         else PROJECT_ROOT / "data/official/mpp")
@@ -592,7 +677,10 @@ def resolve_cli_paths(args):
         args.runtime_root = PROJECT_ROOT / "VICON"
         default_config = args.runtime_root / "configs"
         default_checkpoint = PROJECT_ROOT / "models/VICON/model.pth"
+        prepared_data = PROJECT_ROOT / "data/processed_data/2D/CFD/converted"
         default_data = PROJECT_ROOT / "data/VICON"
+        if not default_data.is_dir() and prepared_data.is_dir():
+            default_data = prepared_data
         calibration_tag = f"cali{args.calibration_num}"
         if args.random_calibration == "y":
             calibration_tag += f"_random_seed{args.calibration_seed}"
@@ -611,6 +699,9 @@ def resolve_cli_paths(args):
         args.yaml_config = args.yaml_config.expanduser().resolve() if args.yaml_config is not None else default_config
     elif args.model_type == "vicon":
         args.config_dir = args.config_dir.expanduser().resolve() if args.config_dir is not None else default_config
+        if args.vicon_file_order != "filesystem":
+            args.vicon_file_order = (Path(args.vicon_file_order).expanduser().resolve() if args.vicon_file_order
+                                     else args.runtime_root / "configs/research_calibration_order.json")
     trace_tag = "trace" if args.use_trace_balance == "y" else "notrace"
     whitening_tag = f"{args.whitening_mode}_eps{args.eps_whiten_mode}{args.eps_whiten}"
     if args.model_type == "poseidon" and args.whitening_mode == "new":
@@ -620,18 +711,39 @@ def resolve_cli_paths(args):
     if args.model_type == "mpp":
         stat = args.ckpt_path.stat() if args.ckpt_path.is_file() else None
         config_hash = hashlib.sha256(args.yaml_config.read_bytes()).hexdigest() if args.yaml_config.is_file() else None
+        source_hashes = [(str(path.relative_to(args.runtime_root)), hashlib.sha256(path.read_bytes()).hexdigest())
+                         for path in sorted(args.runtime_root.rglob("*.py"))]
         identity = (str(args.ckpt_path), stat.st_size if stat else None, stat.st_mtime_ns if stat else None,
-                    str(args.data_root), str(args.runtime_root), str(args.yaml_config), config_hash, args.config)
+                    str(args.data_root), str(args.runtime_root), str(args.yaml_config), config_hash, args.config,
+                    source_hashes)
+        args.mpp_run_provenance = {
+            "checkpoint": _file_identity(args.ckpt_path), "data_root": str(args.data_root),
+            "yaml_config": str(args.yaml_config), "config_sha256": config_hash, "config": args.config,
+            "runtime_root": str(args.runtime_root), "source_hashes": source_hashes,
+        }
         digest = hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:12]
-        input_tag = f"mpp_research_v2_{digest}_{input_tag}"
+        input_tag = f"mpp_research_v3_{digest}_{input_tag}"
     if args.model_type == "vicon":
         # A new namespace prevents reuse of pre-alignment statistics/ranks.
         stat = args.ckpt_path.stat() if args.ckpt_path.is_file() else None
+        config_hashes = [(str(path.relative_to(args.config_dir)), hashlib.sha256(path.read_bytes()).hexdigest())
+                         for path in sorted(args.config_dir.rglob("*.yaml"))]
+        order_path = args.vicon_file_order
+        args.vicon_file_order_sha256 = (hashlib.sha256(order_path.read_bytes()).hexdigest()
+                                        if isinstance(order_path, Path) and order_path.is_file() else None)
         identity = (str(args.ckpt_path), stat.st_size if stat else None,
                     stat.st_mtime_ns if stat else None, str(args.data_root),
-                    str(args.config_dir), args.config_name, args.config_override, args.dataset_workers)
+                    str(args.config_dir), config_hashes, args.config_name, args.config_override, args.dataset_workers,
+                    str(order_path), args.vicon_file_order_sha256)
+        args.vicon_run_provenance = {
+            "checkpoint": _file_identity(args.ckpt_path), "data_root": str(args.data_root),
+            "config_dir": str(args.config_dir), "config_hashes": config_hashes,
+            "config_name": args.config_name, "config_override": args.config_override,
+            "file_order": str(order_path), "file_order_sha256": args.vicon_file_order_sha256,
+            "random_calibration": args.random_calibration,
+        }
         digest = hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:12]
-        input_tag = f"vicon_research_v2_{digest}_{input_tag}"
+        input_tag = f"vicon_research_v3_{digest}_{input_tag}"
     if args.batch_size is not None:
         input_tag += f"_bs{args.batch_size}"
     fisher_tag = f"{input_tag}_{args.gradient_loss}_br{args.balance_ratio}_decay{args.decay_alpha}"
@@ -690,6 +802,10 @@ def load_model_and_data(args):
         params.log_to_wandb = False
         if args.batch_size is not None:
             params["batch_size"] = args.batch_size
+        print(f"MPP effective batch_size={params.batch_size}; "
+              f"gradient_checkpointing={getattr(params, 'gradient_checkpointing', False)}; "
+              f"n_steps={getattr(params, 'n_steps', None)}; "
+              f"enable_amp={getattr(params, 'enable_amp', False)}", flush=True)
         data_root = args.data_root
         for field in ("train_data_paths", "valid_data_paths"):
             rebased = []
@@ -768,7 +884,11 @@ def load_model_and_data(args):
             datasets = all_datasets(cfg.datasets, 0, dataset_seed, "train", cfg.rollout)
         else:
             datasets = all_datasets(cfg.datasets, 0, dataset_seed, "train")
-        batch_size = args.batch_size or 128
+        if args.vicon_file_order != "filesystem":
+            digest = apply_vicon_file_order(datasets, args.vicon_file_order)
+            if digest != args.vicon_file_order_sha256:
+                raise ValueError("VICON file-order manifest changed after cache paths were resolved")
+        batch_size = args.batch_size
         calibration_data = build_calibration_loaders(
             datasets, calibration_num=args.calibration_num, batch_size=batch_size,
             num_workers=cfg.dataset_workers, random_calibration=args.random_calibration == "y",
@@ -808,7 +928,33 @@ def load_model_and_data(args):
     return model, calibration_data, params, trainer, rollout_fn
 
 
+def _run_research_stages(args, argv):
+    """Mirror MPP/VICON MySVD/safe_svd.py with two independent processes."""
+    shared = []
+    fields = ["ckpt_path", "data_root", "profile_cache", "fisher_cache", "rank_cache", "save_path"]
+    fields += ["config_dir", "vicon_file_order"] if args.model_type == "vicon" else ["yaml_config"]
+    for field in fields:
+        shared.extend([f"--{field}", str(getattr(args, field))])
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(PROJECT_ROOT), env.get("PYTHONPATH"))))
+    for stage in ("rank_selection", "compression"):
+        child_args = [value for value in argv if stage != "compression" or value != "--overwrite_cache"]
+        if stage == "compression" and args.overwrite_cache:
+            child_args.append("--_overwrite_output")
+        command = [sys.executable, "-u", "-m", "safe_svd.main", *child_args, *shared,
+                   "--pipeline_stage", stage]
+        print(f"==== Starting {args.model_type.upper()} {stage} ====\n$ {shlex.join(command)}", flush=True)
+        result = subprocess.run(command, env=env, check=False)
+        if result.returncode:
+            print(f"==== {args.model_type.upper()} {stage} failed with exit code {result.returncode} ====", flush=True)
+            return result.returncode
+        if stage == "rank_selection" and not args.rank_cache.is_file():
+            raise FileNotFoundError(f"Rank selection did not produce {args.rank_cache}")
+    return 0
+
+
 def cli_main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
     args = resolve_cli_paths(parse_args(argv))
     print("==== Unified SAFE-SVD configuration ====", flush=True)
     print(f"Model: {args.model_type}; device: {args.DEV}; rank_selector: {args.rank_selector}; rank_ratio: {args.rank_ratio}")
@@ -821,6 +967,8 @@ def cli_main(argv=None):
     print(f"Whitening: {args.whitening_mode}/{args.eps_whiten_mode}/{args.eps_whiten}; Fisher: {args.use_fisher}/{args.gradient_loss}; stage: {args.pipeline_stage}")
     print(f"Checkpoint: {args.ckpt_path}")
     print(f"Data root: {args.data_root}")
+    if args.model_type == "vicon":
+        print(f"VICON batch_size: {args.batch_size}; file order: {args.vicon_file_order}")
     print(f"Input cache: {args.profile_cache}")
     print(f"Fisher cache: {args.fisher_cache}")
     print(f"Rank cache: {args.rank_cache}")
@@ -829,13 +977,17 @@ def cli_main(argv=None):
     if args.dry_run:
         return 0
     filename = "compressed_model.pth" if args.model_type == "vicon" else "compressed_model.pt"
-    if args.pipeline_stage != "rank_selection" and (args.save_path / filename).is_file() and not args.overwrite_cache:
+    if (args.pipeline_stage != "rank_selection" and (args.save_path / filename).is_file()
+            and not (args.overwrite_cache or args._overwrite_output)):
         raise FileExistsError(f"Model already exists: {args.save_path / filename}; choose a new save_path")
+    if args.model_type in {"mpp", "vicon"} and args.pipeline_stage == "all":
+        return _run_research_stages(args, argv)
     model, calibration_data, params, trainer, rollout_fn = load_model_and_data(args)
     # Record resolved settings before the expensive stages, including failures.
     # This does not overwrite or invalidate any existing calibration cache.
     args.save_path.mkdir(parents=True, exist_ok=True)
-    run_config_path = args.save_path / "run_config.json"
+    run_config_path = args.save_path / ("rank_run_config.json" if args.model_type in {"mpp", "vicon"}
+                                       and args.pipeline_stage == "rank_selection" else "run_config.json")
     config_file = args.ckpt_path / "config.json"
     run_config = {
         "argv": list(sys.argv[1:] if argv is None else argv),
@@ -846,9 +998,10 @@ def cli_main(argv=None):
         "compression_checkpoint_exists_before_run": (args.save_path / "compressing_model.pt").is_file(),
         "compression_dtype": "float32" if args.compression_backend == "low-gpu" else "float64",
         "poseidon_factor_dtype": "float32" if args.model_type == "poseidon" else None,
-        "vicon_alignment_version": 2 if args.model_type == "vicon" else None,
+        "vicon_alignment_version": 3 if args.model_type == "vicon" else None,
         "vicon_factor_dtype": "float32" if args.model_type == "vicon" else None,
-        "mpp_alignment_version": 2 if args.model_type == "mpp" else None,
+        "mpp_alignment_version": 3 if args.model_type == "mpp" else None,
+        "effective_mpp_config": _effective_mpp_config(params) if args.model_type == "mpp" else None,
         "mpp_factor_dtype": "float32" if args.model_type == "mpp" else None,
         "capture_cache_device": "cpu",
     }
@@ -887,6 +1040,8 @@ def cli_main(argv=None):
         rank_cache=args.rank_cache,
         save_path=args.save_path,
         overwrite_cache=args.overwrite_cache,
+        overwrite_output=args._overwrite_output,
+        run_provenance=getattr(args, f"{args.model_type}_run_provenance", None),
         checkpoint_percent=args.checkpoint_percent,
         pipeline_stage=args.pipeline_stage,
         perf_csv_path=args.save_path / "gpu_profile.csv" if args.gpu_profile else None,

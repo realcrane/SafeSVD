@@ -37,7 +37,7 @@ class MPPAlignmentTests(unittest.TestCase):
             with patch.object(entry, "PROJECT_ROOT", root):
                 args = entry.resolve_cli_paths(entry.parse_args(["--model", "mpp"]))
             self.assertEqual(args.runtime_root, flat)
-            self.assertEqual(args.yaml_config, flat / "config/mpp_avit_L_config.yaml")
+            self.assertEqual(args.yaml_config, root / "safe_svd/configs/mpp_avit_L_config.yaml")
             request = SimpleNamespace(repo_root=root, config=SimpleNamespace(source_root=None))
             with patch.dict(os.environ, {}, clear=True):
                 self.assertEqual(MPPAdapter().source_root(request), flat.resolve())
@@ -56,7 +56,7 @@ class MPPAlignmentTests(unittest.TestCase):
                     return entry.resolve_cli_paths(entry.parse_args([
                         "--model", "mpp", "--yaml_config", str(config), "--rank_selector", selector]))
             first, safe = resolve("legacy"), resolve("safe")
-            self.assertIn("mpp_research_v2", str(first.profile_cache))
+            self.assertIn("mpp_research_v3", str(first.profile_cache))
             self.assertEqual(first.profile_cache, safe.profile_cache)
             self.assertNotEqual(first.rank_cache, safe.rank_cache)
             self.assertNotEqual(first.save_path, safe.save_path)

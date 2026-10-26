@@ -42,7 +42,8 @@ class UnifiedCLITests(unittest.TestCase):
         self.assertEqual(mpp.gradient_loss, "mse")
         self.assertEqual(mpp.rank_selector, "legacy")
         vicon = self.entry.parse_args(["--model_type", "vicon", "--use_trace_align", "n"])
-        self.assertEqual((vicon.rank_ratio, vicon.calibration_num, vicon.calibration_seed), (0.8, 2048, 2026))
+        self.assertEqual((vicon.rank_ratio, vicon.calibration_num, vicon.calibration_seed), (0.8, 2048, 42))
+        self.assertEqual(vicon.batch_size, 64)
         self.assertEqual(vicon.use_trace_balance, "n")
         poseidon = self.entry.parse_args(["--model", "poseidon", "--calibration_seed", "default", "--model_path", "weights"])
         self.assertIsNone(poseidon.calibration_seed)
@@ -96,7 +97,7 @@ class UnifiedCLITests(unittest.TestCase):
                         "--save_path", "out"]))
                     self.assertEqual(vicon.ckpt_path, invocation / "weights.pth")
                     self.assertEqual(vicon.runtime_root, repository / "VICON")
-                    self.assertIn("vicon_research_v2", str(vicon.profile_cache))
+                    self.assertIn("vicon_research_v3", str(vicon.profile_cache))
                     self.assertEqual(vicon.data_root, invocation / "data")
                     self.assertEqual(vicon.save_path, invocation / "out")
                     poseidon = self.entry.resolve_cli_paths(self.entry.parse_args(["--model", "poseidon"]))
@@ -116,6 +117,21 @@ class UnifiedCLITests(unittest.TestCase):
                 args = self.entry.resolve_cli_paths(self.entry.parse_args(["--model", "poseidon", "--DEV", "cpu"]))
                 with self.assertRaisesRegex(ValueError, "inside this repository"):
                     self.entry.load_model_and_data(args)
+
+    def test_vicon_data_root_prefers_aligned_tree_over_prepared_fallback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            prepared = root / "data/processed_data/2D/CFD/converted"
+            prepared.mkdir(parents=True)
+            with patch.object(self.entry, "PROJECT_ROOT", root):
+                args = self.entry.resolve_cli_paths(self.entry.parse_args(["--model", "vicon"]))
+                self.assertEqual(args.data_root, prepared)
+                (root / "data/VICON").mkdir()
+                args = self.entry.resolve_cli_paths(self.entry.parse_args(["--model", "vicon"]))
+                self.assertEqual(args.data_root, root / "data/VICON")
+                explicit = self.entry.resolve_cli_paths(self.entry.parse_args([
+                    "--model", "vicon", "--data_root", str(prepared)]))
+                self.assertEqual(explicit.data_root, prepared)
 
     def test_poseidon_fisher_batch_size_is_part_of_cache_identity(self):
         first = self.entry.resolve_cli_paths(self.entry.parse_args([
@@ -178,9 +194,11 @@ class UnifiedCLITests(unittest.TestCase):
                 return None, dataset, None
             modules["multiple_physics_pretraining.data_utils.datasets"].get_data_loader = data_loader
             with patch.dict(sys.modules, modules), patch.object(sys, "path", sys.path[:]), patch.object(self.entry, "PROJECT_ROOT", root):
-                code = self.entry.cli_main(["--model", "mpp", "--ckpt_path", str(checkpoint),
+                arguments = ["--model", "mpp", "--ckpt_path", str(checkpoint),
                     "--data_root", str(root / "data"), "--calibration_num", "4", "--rank_ratio", "0.5", "--DEV", "cpu",
-                    "--cache_dir", str(root / "cache"), "--rank_root", str(root / "ranks"), "--save_path", str(root / "out")])
+                    "--cache_dir", str(root / "cache"), "--rank_root", str(root / "ranks"), "--save_path", str(root / "out")]
+                self.assertEqual(self.entry.cli_main(arguments + ["--pipeline_stage", "rank_selection"]), 0)
+                code = self.entry.cli_main(arguments + ["--pipeline_stage", "compression"])
             self.assertEqual(code, 0)
             self.assertEqual(loaded[0][0][0][0], str(root / "data/train.h5"))
             self.assertEqual(loaded[0][1]["split"], "train")
@@ -216,10 +234,13 @@ class UnifiedCLITests(unittest.TestCase):
                 return {name: loader.dataset for name, loader in loaders.items()}
             modules["VICON.src.dataset"].all_datasets = all_datasets
             with patch.dict(sys.modules, modules), patch.object(sys, "path", sys.path[:]), patch.object(self.entry, "PROJECT_ROOT", root):
-                code = self.entry.cli_main(["--model", "vicon", "--ckpt_path", str(checkpoint),
+                arguments = ["--model", "vicon", "--ckpt_path", str(checkpoint),
                     "--data_root", str(root / "data"), "--batch_size", "2", "--calibration_num", "4", "--random_calibration", "y",
                     "--calibration_seed", "19", "--rank_ratio", "0.5", "--DEV", "cpu",
-                    "--cache_dir", str(root / "cache"), "--rank_root", str(root / "ranks"), "--save_path", str(root / "out")])
+                    "--vicon_file_order", "filesystem", "--cache_dir", str(root / "cache"),
+                    "--rank_root", str(root / "ranks"), "--save_path", str(root / "out")]
+                self.assertEqual(self.entry.cli_main(arguments + ["--pipeline_stage", "rank_selection"]), 0)
+                code = self.entry.cli_main(arguments + ["--pipeline_stage", "compression"])
             self.assertEqual(code, 0)
             self.assertEqual(calls[0][:2], (19, "train"))
             self.assertIs(calls[0][2], cfg.rollout)

@@ -78,15 +78,41 @@ def collect_inputs(
             covariance = torch.eye(layer.in_features, device=target, dtype=torch.float64)
         else:
             raise ValueError(f"No input samples for {name}")
-        if whitening == "fisher_cholesky":
-            left, inverse = fisher_whitener(covariance)
-            factors = left.T, inverse
-        else:
-            factors = right_whitener(covariance, method="spectral", eps=eps,
-                                     eps_mode=eps_mode, sample_count=max(count, 1))
+        # The merged covariance owns its storage. Raw per-category Gram
+        # matrices are no longer needed; retaining them makes GPU usage grow
+        # across the entire whitening pass rather than decrease layer by layer.
+        stats.sums.pop(name, None)
+        stats.counts.pop(name, None)
+        if target.type == "cuda":
+            # cuSOLVER creates its handle lazily and allocates outside the
+            # PyTorch cache. Release unused activation/Gram blocks first.
+            torch.cuda.empty_cache()
+        try:
+            if whitening == "fisher_cholesky":
+                left, inverse = fisher_whitener(covariance)
+                factors = left.T, inverse
+                del left, inverse
+            else:
+                factors = right_whitener(covariance, method="spectral", eps=eps,
+                                         eps_mode=eps_mode, sample_count=max(count, 1))
+        except RuntimeError as error:
+            memory = ""
+            if target.type == "cuda":
+                try:
+                    free, total = torch.cuda.mem_get_info(target)
+                    memory = (f"; GPU free={free / 2**20:.0f}/{total / 2**20:.0f} MiB"
+                              f", allocated={torch.cuda.memory_allocated(target) / 2**20:.0f} MiB"
+                              f", reserved={torch.cuda.memory_reserved(target) / 2**20:.0f} MiB")
+                except RuntimeError:
+                    memory = "; GPU memory query unavailable"
+            raise RuntimeError(
+                f"Input whitening failed for {name}, covariance={tuple(covariance.shape)}, "
+                f"dtype={covariance.dtype}, device={covariance.device}{memory}: {error}"
+            ) from error
         metrics[name] = tuple(value.cpu().float() for value in factors)
         if return_statistics:
             covariances[name] = covariance.cpu()
+        del covariance, factors
     if return_statistics:
         return metrics, counts, covariances
     return (metrics, counts) if return_sample_counts else metrics

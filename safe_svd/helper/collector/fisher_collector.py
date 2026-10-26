@@ -88,8 +88,18 @@ def collect_fisher(
         if not counts[name]:
             continue  # Rank/compress use identity when a left metric is absent.
         covariance = stats.covariance(name, aggregation=aggregation, trace_balance=trace_balance,
-                                      trace_groups=trace_groups)
+                                      trace_groups=trace_groups,
+                                      preserve_accumulation_dtype=model_type == "mpp")
+        # The merged matrix owns its storage. Drop the raw per-category
+        # covariances before decomposition instead of retaining every layer
+        # until the final whitening operation finishes.
+        stats.sums.pop(name, None)
+        stats.counts.pop(name, None)
+        if target.type == "cuda":
+            # cuSOLVER may allocate outside PyTorch's caching allocator.
+            torch.cuda.empty_cache()
         metrics[name] = tuple(value.cpu() for value in fisher_whitener(covariance, care_identity=care_identity))
         if return_statistics:
             covariances[name] = covariance.cpu()
+        del covariance
     return (metrics, counts, covariances) if return_statistics else metrics

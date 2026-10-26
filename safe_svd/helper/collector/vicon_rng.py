@@ -1,12 +1,13 @@
-"""Preserve VICON's stage-to-stage stream when a statistics cache is reused.
+"""Capture VICON's compression entry stream for replay and checkpoint resume.
 
-The research pipeline advances dataset-owned RNGs (and shuffles file paths)
-across profiling, Fisher and compression. Loading tensors alone skips that
-advancement. Snapshots are weights_only-compatible; no pickled dataset objects.
+The research wrapper starts compression in a separate process. Statistics
+cache hits never restore RNGs; only compression checkpoints replay the state
+before prefetch. Snapshots are weights_only-compatible, without dataset objects.
 """
 
 import copy
 import random
+from collections import Counter
 
 import numpy as np
 import torch
@@ -31,7 +32,7 @@ def capture(loaders):
     }
     for name, loader in loaders.items():
         if getattr(loader, "persistent_workers", False):
-            raise ValueError("VICON cache replay requires persistent_workers=False")
+            raise ValueError("VICON compression replay requires persistent_workers=False")
         dataset = _dataset(loader)
         fields = {}
         fields["loader_settings"] = {key: getattr(loader, key, None)
@@ -51,16 +52,18 @@ def capture(loaders):
 
 def restore(loaders, state):
     if state is None:
-        raise ValueError("VICON cache lacks calibration RNG state. Recompute with --overwrite_cache "
-                         "(public CLI: --overwrite), or use a fresh cache directory.")
-    if set(loaders) != set(state["datasets"]):
-        raise ValueError("VICON cache datasets do not match the current calibration datasets")
+        raise ValueError("VICON checkpoint lacks compression RNG state; use a new save_path")
+    if list(loaders) != list(state["datasets"]):
+        raise ValueError("VICON checkpoint datasets/order do not match the current calibration datasets")
     for name, loader in loaders.items():
         settings = {key: getattr(loader, key, None) for key in ("batch_size", "num_workers", "drop_last")}
         if settings != state["datasets"][name]["loader_settings"]:
-            raise ValueError("VICON cache batch size/worker settings changed; recompute the cache")
+            raise ValueError("VICON checkpoint batch size/worker settings changed; use a new save_path")
         if getattr(loader, "persistent_workers", False):
-            raise ValueError("VICON cache replay requires persistent_workers=False")
+            raise ValueError("VICON compression replay requires persistent_workers=False")
+        paths = state["datasets"][name].get("dp")
+        if paths is not None and Counter(paths) != Counter(getattr(_dataset(loader), "dp", [])):
+            raise ValueError("VICON checkpoint data files differ from current calibration data; use a new save_path")
     random.setstate(state["python"])
     name, keys, pos, gaussian, cached = state["numpy"]
     np.random.set_state((name, np.asarray(keys, dtype=np.uint32), pos, gaussian, cached))

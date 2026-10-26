@@ -1,4 +1,4 @@
-"""VICON cold/warm cache and original MySVD numerical regressions."""
+"""VICON process boundaries, cache compatibility and MySVD regressions."""
 
 import copy
 import importlib
@@ -6,8 +6,11 @@ import io
 import json
 import os
 import random
+import subprocess
+import sys
 import tempfile
 import unittest
+from itertools import product
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -56,8 +59,8 @@ class ViconResearchAlignmentTests(unittest.TestCase):
         torch.testing.assert_close(torch.rand(()), expected_global[2], rtol=0, atol=0)
         self.assertEqual(fresh["NS2D"].dataset.dp, loaders["NS2D"].dataset.dp)
 
-    def test_missing_stream_state_is_not_silently_accepted(self):
-        with self.assertRaisesRegex(ValueError, "Recompute"):
+    def test_missing_compression_stream_state_is_not_silently_accepted(self):
+        with self.assertRaises(ValueError):
             vicon_rng.restore({}, None)
 
     def test_cache_rejects_changed_batch_size(self):
@@ -65,40 +68,289 @@ class ViconResearchAlignmentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "batch size/worker"):
             vicon_rng.restore({"NS2D": DataLoader(Stream(), batch_size=2)}, state)
 
-    def test_partial_and_full_cache_hits_replay_stage_inputs(self):
+    def test_resume_rejects_changed_category_order(self):
+        loaders = {name: DataLoader(Stream(), batch_size=1) for name in ("NS2D", "EULER2D")}
+        state = vicon_rng.capture(loaders)
+        with self.assertRaises(ValueError):
+            vicon_rng.restore(dict(reversed(list(loaders.items()))), state)
+
+    @staticmethod
+    def _seed(value):
+        random.seed(value)
+        np.random.seed(value)
+        torch.manual_seed(value)
+
+    @classmethod
+    def _fresh_stream_case(cls, seed):
+        cls._seed(seed)
+        model = nn.Sequential(nn.Linear(3, 5), nn.Linear(5, 3))
+        return model, {"NS2D": DataLoader(Stream(), batch_size=1)}
+
+    @staticmethod
+    def _consume(loaders):
+        return torch.cat(list(loaders["NS2D"]))
+
+    def test_reference_cache_hits_skip_sampling_and_compression_starts_fresh(self):
+        entry = importlib.import_module("safe_svd.main")
+        for input_hit, fisher_hit in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(input_hit=input_hit, fisher_hit=fisher_hit), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                # The original caches contain factors only, with no RNG payload.
+                if input_hit:
+                    torch.save({}, root / "input.pt")
+                if fisher_hit:
+                    torch.save({}, root / "fisher.pt")
+
+                # The rank process only iterates stages whose caches are absent.
+                _, reference_loaders = self._fresh_stream_case(701)
+                expected = {}
+                if not input_hit:
+                    self._seed(42)  # Original profile_svd_vicon seed boundary.
+                    expected["profile"] = self._consume(reference_loaders)
+                if not fisher_hit:
+                    expected["fisher"] = self._consume(reference_loaders)
+                # A separate compression process gets a new loader. The Python
+                # API models that boundary for a fixed caller-supplied RNG state;
+                # it does not claim to reproduce an old process's unknown entropy.
+                _, reference_loaders = self._fresh_stream_case(701)
+                expected["compress"] = self._consume(reference_loaders)
+                seen = {}
+
+                def profile(model, loaders, **kwargs):
+                    self._seed(42)
+                    seen["profile"] = self._consume(loaders)
+                    return {}, {}
+
+                def fisher(model, loaders, **kwargs):
+                    seen["fisher"] = self._consume(loaders)
+                    return {}
+
+                def compress(model, loaders, *args, **kwargs):
+                    seen["compress"] = self._consume(loaders)
+                    return model
+
+                model, loaders = self._fresh_stream_case(701)
+                with patch.object(entry, "collect_inputs", side_effect=profile), \
+                     patch.object(entry, "collect_fisher", side_effect=fisher), \
+                     patch.object(entry, "allocate_ranks", return_value={}), \
+                     patch.object(entry, "compress", side_effect=compress):
+                    entry.main(model, loaders, trainer=SimpleNamespace(model=model), model_type="vicon",
+                               rank_ratio=.5, device="cpu", profile_cache=root / "input.pt",
+                               fisher_cache=root / "fisher.pt", rank_cache=root / "ranks.json", verbose=False)
+                self.assertEqual(set(seen), set(expected))
+                for stage in expected:
+                    torch.testing.assert_close(seen[stage], expected[stage], rtol=0, atol=0)
+                for path, cache_hit in ((root / "input.pt", input_hit), (root / "fisher.pt", fisher_hit)):
+                    if not cache_hit:
+                        payload = torch.load(path, weights_only=True)
+                        self.assertEqual(payload["vicon_alignment_version"], 3)
+                        self.assertNotIn("vicon_rng_state", payload)
+
+    def test_old_structured_statistics_caches_are_rejected(self):
+        entry = importlib.import_module("safe_svd.main")
+        valid_input = {"profile_mat": {}, "sample_counts": {}, "vicon_alignment_version": 3}
+        valid_fisher = {"fisher_mat": {}, "vicon_alignment_version": 3}
+        old_caches = (
+            ("input", {"profile_mat": {}, "sample_counts": {}}),
+            ("input", {"profile_mat": {}, "sample_counts": {}, "vicon_alignment_version": 2}),
+            ("input", {"profile_mat": {}, "sample_counts": {}, "vicon_rng_state": {}}),
+            ("fisher", {"fisher_mat": {}}),
+            ("fisher", {"fisher_mat": {}, "vicon_alignment_version": 2}),
+            ("fisher", {"fisher_mat": {}, "vicon_rng_state": {}}),
+        )
+        for stage, payload in old_caches:
+            with self.subTest(stage=stage, fields=list(payload)), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                torch.save(payload if stage == "input" else valid_input, root / "input.pt")
+                torch.save(payload if stage == "fisher" else valid_fisher, root / "fisher.pt")
+                model, loaders = self._fresh_stream_case(701)
+                with patch.object(entry, "collect_inputs", side_effect=AssertionError("unexpected input recomputation")), \
+                     patch.object(entry, "collect_fisher", side_effect=AssertionError("unexpected Fisher recomputation")), \
+                     patch.object(entry, "allocate_ranks", return_value={}), \
+                     self.assertRaisesRegex(ValueError, "(?i)cache|alignment|version"):
+                    entry.main(model, loaders, trainer=SimpleNamespace(model=model), model_type="vicon",
+                               rank_ratio=.5, device="cpu", profile_cache=root / "input.pt",
+                               fisher_cache=root / "fisher.pt", pipeline_stage="rank_selection", verbose=False)
+
+    def test_disabling_compression_fisher_keeps_reference_fisher_rank_selection(self):
+        entry = importlib.import_module("safe_svd.main")
+        model, loaders = self._fresh_stream_case(701)
+        fisher = {"0": (torch.eye(5), torch.eye(5))}
+        ranks = {"0": 1, "1": 1}
+        with tempfile.TemporaryDirectory() as directory:
+            rank_path = Path(directory) / "rank.json"
+            with patch.object(entry, "collect_inputs", return_value=({}, {})), \
+                 patch.object(entry, "collect_fisher", return_value=fisher) as collect, \
+                 patch.object(entry, "allocate_ranks", return_value=ranks) as allocate, \
+                 patch.object(entry, "compress", return_value=model) as compress:
+                entry.main(model, loaders, trainer=SimpleNamespace(model=model), model_type="vicon",
+                           rank_ratio=.5, rank_selector="legacy", use_fisher="n", device="cpu",
+                           rank_cache=rank_path, verbose=False)
+            collect.assert_called_once()
+            allocate.assert_called_once()
+            left = allocate.call_args.kwargs["left_whiteners"]
+            self.assertEqual(set(left), set(fisher))
+            for actual, expected in zip(left["0"], fisher["0"]):
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            self.assertIsNone(compress.call_args.kwargs["left_metrics"])
+            self.assertEqual(json.loads(rank_path.read_text()), ranks)
+
+    def test_rank_stage_recomputes_an_existing_rank_file(self):
+        entry = importlib.import_module("safe_svd.main")
+        model, loaders = self._fresh_stream_case(701)
+        ranks = {"0": 1, "1": 1}
+        with tempfile.TemporaryDirectory() as directory:
+            rank_path = Path(directory) / "rank.json"
+            rank_path.write_text(json.dumps({"0": None, "1": None}))
+            with patch.object(entry, "collect_inputs", return_value=({}, {})), \
+                 patch.object(entry, "collect_fisher", return_value={}), \
+                 patch.object(entry, "allocate_ranks", return_value=ranks) as allocate, \
+                 patch.object(entry, "compress") as compress:
+                entry.main(model, loaders, trainer=SimpleNamespace(model=model), model_type="vicon",
+                           rank_ratio=.5, device="cpu", rank_cache=rank_path,
+                           pipeline_stage="rank_selection", verbose=False)
+            allocate.assert_called_once()
+            compress.assert_not_called()
+            self.assertEqual(json.loads(rank_path.read_text()), ranks)
+
+    def test_resume_replays_original_prefetch_after_student_reconstruction(self):
         entry = importlib.import_module("safe_svd.main")
         seen = []
-        def consume(loaders):
-            return torch.cat(list(loaders["NS2D"]))
+        ranks = {"0": 1, "1": 1}
+
         def profile(model, loaders, **kwargs):
-            random.seed(42)
-            np.random.seed(42)
-            torch.manual_seed(42)
-            consume(loaders)
+            self._seed(42)
+            self._consume(loaders)
             return {}, {}
+
         def fisher(model, loaders, **kwargs):
-            seen.append(("fisher", consume(loaders)))
+            self._consume(loaders)
             return {}
-        def compress(model, loaders, *args, **kwargs):
-            seen.append(("compress", consume(loaders)))
-            return model
+
+        def interrupted_compress(model, loaders, *args, **kwargs):
+            seen.append((self._consume(loaders), torch.rand(4)))
+            student = copy.deepcopy(model)
+            student[0] = nn.Sequential(nn.Linear(3, 1, bias=False), nn.Linear(1, 5))
+            kwargs["checkpoint_fn"](student, {"0"})
+            raise RuntimeError("synthetic interruption after first compressed layer")
+
+        def resumed_compress(model, loaders, *args, **kwargs):
+            self.assertEqual(kwargs["completed_layers"], {"0"})
+            self.assertIsInstance(kwargs["initial_student"][0], nn.Sequential)
+            seen.append((self._consume(loaders), torch.rand(4)))
+            return kwargs["initial_student"]
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            options = dict(model_type="vicon", rank_ratio=.5, device="cpu", profile_cache=root / "input.pt",
+                           fisher_cache=root / "fisher.pt", rank_cache=root / "ranks.json", save_path=root / "out",
+                           verbose=False)
+            model, loaders = self._fresh_stream_case(701)
+            original_weights = copy.deepcopy(model.state_dict())
             with patch.object(entry, "collect_inputs", side_effect=profile), \
                  patch.object(entry, "collect_fisher", side_effect=fisher), \
-                 patch.object(entry, "allocate_ranks", return_value={}), \
-                 patch.object(entry, "compress", side_effect=compress):
-                for fisher_path in (root / "first.pt", root / "second.pt", root / "first.pt"):
-                    model = nn.Linear(2, 2)
-                    entry.main(model, {"NS2D": DataLoader(Stream(), batch_size=1)},
-                               trainer=SimpleNamespace(model=model), model_type="vicon", rank_ratio=.5,
-                               device="cpu", profile_cache=root / "input.pt", fisher_cache=fisher_path,
-                               rank_cache=root / "ranks.json", verbose=False)
-        # cold, input cache only, both caches: Fisher and compression see identical streams.
-        self.assertEqual([name for name, _ in seen], ["fisher", "compress", "fisher", "compress", "compress"])
-        torch.testing.assert_close(seen[0][1], seen[2][1], rtol=0, atol=0)
-        for index in (3, 4):
-            torch.testing.assert_close(seen[1][1], seen[index][1], rtol=0, atol=0)
+                 patch.object(entry, "allocate_ranks", return_value=ranks), \
+                 patch.object(entry, "compress", side_effect=interrupted_compress):
+                with self.assertRaisesRegex(RuntimeError, "synthetic interruption"):
+                    entry.main(model, loaders, trainer=SimpleNamespace(model=model), **options)
+            self.assertTrue((root / "out/compressing_model.pt").is_file())
+
+            # A restart has unrelated global RNG state. Reconstructing low-rank
+            # nn.Linear modules also consumes Torch RNG before the resume hook.
+            model, loaders = self._fresh_stream_case(983)
+            model.load_state_dict(original_weights)
+            with patch.object(entry, "collect_inputs", side_effect=AssertionError("unexpected input recomputation")), \
+                 patch.object(entry, "collect_fisher", side_effect=AssertionError("unexpected Fisher recomputation")), \
+                 patch.object(entry, "allocate_ranks", return_value=ranks), \
+                 patch.object(entry, "compress", side_effect=resumed_compress):
+                entry.main(model, loaders, trainer=SimpleNamespace(model=model), **options)
+            self.assertFalse((root / "out/compressing_model.pt").exists())
+            self.assertTrue((root / "out/compressed_model.pth").is_file())
+        for actual, expected in zip(seen[1], seen[0]):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_resume_rejects_changed_provenance_and_statistics(self):
+        entry = importlib.import_module("safe_svd.main")
+
+        def interrupted_compress(model, loaders, *args, **kwargs):
+            kwargs["checkpoint_fn"](copy.deepcopy(model), set())
+            raise RuntimeError("synthetic interruption")
+
+        for changed in ("run_provenance", "statistics_files"):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                options = dict(model_type="vicon", rank_ratio=.5, device="cpu", profile_cache=root / "input.pt",
+                               fisher_cache=root / "fisher.pt", rank_cache=root / "ranks.json", save_path=root / "out",
+                               run_provenance={"checkpoint": "checkpoint-a", "data": "data-a"}, verbose=False)
+                model, loaders = self._fresh_stream_case(701)
+                with patch.object(entry, "collect_inputs", return_value=({}, {})), \
+                     patch.object(entry, "collect_fisher", return_value={}), \
+                     patch.object(entry, "allocate_ranks", return_value={}), \
+                     patch.object(entry, "compress", side_effect=interrupted_compress):
+                    with self.assertRaisesRegex(RuntimeError, "synthetic interruption"):
+                        entry.main(model, loaders, trainer=SimpleNamespace(model=model), **options)
+                checkpoint = root / "out/compressing_model.pt"
+                saved = checkpoint.read_bytes()
+                if changed == "run_provenance":
+                    options["run_provenance"] = {"checkpoint": "checkpoint-b", "data": "data-a"}
+                else:
+                    # A valid new statistics file at the old path must not be
+                    # combined silently with a partially compressed checkpoint.
+                    torch.save({"fisher_mat": {}, "vicon_alignment_version": 3,
+                                "replacement": torch.zeros(7)}, root / "fisher.pt")
+                model, loaders = self._fresh_stream_case(701)
+                with patch.object(entry, "compress") as compress, \
+                     self.assertRaisesRegex(ValueError, changed):
+                    entry.main(model, loaders, trainer=SimpleNamespace(model=model), **options)
+                compress.assert_not_called()
+                self.assertEqual(checkpoint.read_bytes(), saved)
+
+    def test_cli_all_uses_separate_stage_processes_and_scopes_overwrite(self):
+        entry = importlib.import_module("safe_svd.main")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "out"
+            output.mkdir()
+            (output / "compressed_model.pth").write_bytes(b"previous output")
+            args = ["--model", "vicon", "--DEV", "cpu", "--ckpt_path", str(root / "model.pth"),
+                    "--data_root", str(root / "data"), "--save_path", str(output),
+                    "--profile_cache", str(root / "input.pt"), "--fisher_cache", str(root / "fisher.pt"),
+                    "--rank_cache", str(root / "rank.json"), "--pipeline_stage", "all", "--overwrite_cache"]
+
+            def run_child(command, **kwargs):
+                if command[-1] == "rank_selection" or "rank_selection" in command:
+                    (root / "rank.json").write_text("{}")
+                    torch.save({"profile_mat": {}, "sample_counts": {}, "vicon_alignment_version": 3},
+                               root / "input.pt")
+                    torch.save({"fisher_mat": {}, "vicon_alignment_version": 3}, root / "fisher.pt")
+                return subprocess.CompletedProcess(command, 0)
+
+            with patch("subprocess.run", side_effect=run_child) as run, \
+                 patch.object(entry, "load_model_and_data") as load:
+                self.assertEqual(entry.cli_main(args), 0)
+            load.assert_not_called()
+            self.assertEqual(run.call_count, 2)
+            commands = [call.args[0] for call in run.call_args_list]
+            for command, expected_stage in zip(commands, ("rank_selection", "compression")):
+                self.assertEqual(command[0], sys.executable)
+                self.assertIn("safe_svd.main", command)
+                stage = [command[i + 1] for i, arg in enumerate(command[:-1]) if arg == "--pipeline_stage"]
+                self.assertEqual(stage[-1], expected_stage)
+                self.assertIn(str(root / "model.pth"), command)
+                self.assertIn(str(root / "data"), command)
+            self.assertIn("--overwrite_cache", commands[0])
+            self.assertNotIn("--overwrite_cache", commands[1])
+            self.assertIn("--_overwrite_output", commands[1])
+
+    def test_cli_failed_rank_process_does_not_start_compression(self):
+        entry = importlib.import_module("safe_svd.main")
+        with tempfile.TemporaryDirectory() as directory:
+            args = ["--model", "vicon", "--DEV", "cpu", "--save_path", str(Path(directory) / "out")]
+            with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 7)) as run, \
+                 patch.object(entry, "load_model_and_data") as load:
+                self.assertEqual(entry.cli_main(args), 7)
+            run.assert_called_once()
+            load.assert_not_called()
 
     def test_public_compressor_delegates_to_unified_comb_even_when_alpha_zero(self):
         from safesvd.adapters.vicon_runtime import ViconBundle, ViconOptions, run_vicon
@@ -189,29 +441,30 @@ class ViconResearchAlignmentTests(unittest.TestCase):
         source_function(root / "helper/whitener.py", "svd_whitener", namespace)
         source_function(root / "helper/input_collector.py", "collect_covariances_vicon", namespace)
         original = source_function(root / "compress/comb_compress.py", "mysvd_comb", namespace)
-        for alpha in (0., .7, 1.):
-            for trace in (False, True):
-                with self.subTest(alpha=alpha, trace=trace), tempfile.TemporaryDirectory() as directory:
-                    torch.manual_seed(42)
-                    model, data, options, args = make_case("vicon")
-                    ranks = {"first": 1, "second": 2}
-                    # Nontrivial left transform exercises float32 inverse multiplication.
-                    fisher = {}
+        for alpha, trace, use_fisher in product((0., .7, 1.), (False, True), (False, True)):
+            with self.subTest(alpha=alpha, trace=trace, use_fisher=use_fisher), tempfile.TemporaryDirectory() as directory:
+                torch.manual_seed(42)
+                model, data, options, args = make_case("vicon")
+                ranks = {"first": 1, "second": 2}
+                # Nontrivial left transform exercises float32 inverse multiplication;
+                # None exercises the original no-Fisher identity path.
+                fisher = {} if use_fisher else None
+                if use_fisher:
                     for name, layer in model.named_modules():
                         if isinstance(layer, nn.Linear):
                             left = torch.diag(torch.linspace(.7, 1.8, layer.out_features))
                             fisher[name] = (left, torch.linalg.inv(left))
-                    path = Path(directory) / "ranks.json"
-                    path.write_text(json.dumps(ranks))
-                    expected = original(options["trainer"], data, dev="cpu", ranks_json_path=str(path),
-                                        Ldict=fisher, max_calib_batches=2, alpha=alpha, use_trace_align=trace)
-                    options["trainer"].model = model
-                    actual = compress(model, data, ranks, model_type="vicon", device="cpu",
-                                      route_options=options, left_metrics=fisher, alpha=alpha,
-                                      trace_balance=trace)
-                    # SVD signs need not agree; compare effective operators and predictions.
-                    for name in ranks:
-                        a, b = actual.get_submodule(name), expected.get_submodule(name)
-                        torch.testing.assert_close(a[1].weight @ a[0].weight,
-                                                   b[1].weight @ b[0].weight, atol=2e-6, rtol=2e-5)
-                    torch.testing.assert_close(actual(*args), expected(*args), atol=2e-6, rtol=2e-5)
+                path = Path(directory) / "ranks.json"
+                path.write_text(json.dumps(ranks))
+                expected = original(options["trainer"], data, dev="cpu", ranks_json_path=str(path),
+                                    Ldict=fisher, max_calib_batches=2, alpha=alpha, use_trace_align=trace)
+                options["trainer"].model = model
+                actual = compress(model, data, ranks, model_type="vicon", device="cpu",
+                                  route_options=options, left_metrics=fisher, alpha=alpha,
+                                  trace_balance=trace)
+                # SVD signs need not agree; compare effective operators and predictions.
+                for name in ranks:
+                    a, b = actual.get_submodule(name), expected.get_submodule(name)
+                    torch.testing.assert_close(a[1].weight @ a[0].weight,
+                                               b[1].weight @ b[0].weight, atol=2e-6, rtol=2e-5)
+                torch.testing.assert_close(actual(*args), expected(*args), atol=2e-6, rtol=2e-5)

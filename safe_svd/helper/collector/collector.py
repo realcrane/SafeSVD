@@ -51,32 +51,46 @@ class CovarianceAccumulator:
     def sample_count(self, name):
         return sum(self.counts.get(name, {}).values())
 
-    def covariance(self, name, *, aggregation, trace_balance, trace_groups=None):
+    def covariance(self, name, *, aggregation, trace_balance, trace_groups=None,
+                   preserve_accumulation_dtype=False):
         return merge_covariances(self.sums[name], self.counts[name], aggregation=aggregation,
-                                 trace_balance=trace_balance, trace_groups=trace_groups)
+                                 trace_balance=trace_balance, trace_groups=trace_groups,
+                                 preserve_accumulation_dtype=preserve_accumulation_dtype)
 
 
-def merge_covariances(sums, counts, *, aggregation="sample_mean", trace_balance=False, trace_groups=None):
-    """Category means / global sample mean, optionally balancing within groups."""
+def merge_covariances(sums, counts, *, aggregation="sample_mean", trace_balance=False, trace_groups=None,
+                      preserve_accumulation_dtype=False):
+    """Category means / global sample mean, optionally balancing within groups.
+
+    MPP Fisher balances and merges in its accumulation dtype (normally FP32),
+    then converts the final covariance to FP64 for whitening. Other routes
+    retain their existing FP64 reduction convention.
+    """
     if aggregation not in {"sample_mean", "category_mean"}:
         raise ValueError("aggregation must be sample_mean or category_mean")
     categories = [name for name in sums if counts.get(name, 0) > 0]
     if not categories:
         raise ValueError("No samples were collected")
     if not trace_balance and aggregation == "sample_mean":
-        return sum(sums[name].double() for name in categories) / sum(counts[name] for name in categories)
-    means = {name: (sums[name] / counts[name]).double() for name in categories}
+        matrices = (sums[name] if preserve_accumulation_dtype else sums[name].double()
+                    for name in categories)
+        return (sum(matrices) / sum(counts[name] for name in categories)).double()
+    means = {name: sums[name] / counts[name] for name in categories}
+    if not preserve_accumulation_dtype:
+        means = {name: value.double() for name, value in means.items()}
     if trace_balance:
         groups = {}
         for name in categories:
             groups.setdefault((trace_groups or {}).get(name, "all"), []).append(name)
         for members in groups.values():
-            traces = {name: means[name].trace().item() for name in members}
+            traces = {name: means[name].trace() for name in members}
+            if not preserve_accumulation_dtype:
+                traces = {name: value.item() for name, value in traces.items()}
             target = max(traces.values())
             for name in members:
                 if traces[name] > 1e-15:
                     means[name] = means[name] * (target / traces[name])
-    return sum(means.values()) / len(categories)
+    return (sum(means.values()) / len(categories)).double()
 
 
 @contextmanager

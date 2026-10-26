@@ -98,7 +98,7 @@ def _cache_key(request: RunRequest, source_root: Path) -> str:
     checkpoint = request.assets.resolved_model_path
     stat = checkpoint.stat() if checkpoint.exists() else None
     fields = (
-        "mpp_research_v2",
+        "mpp_research_v3",
         str(checkpoint), str(stat.st_size if stat else ""), str(stat.st_mtime_ns if stat else ""),
         str(request.assets.resolved_data_root), str(source_root), str(request.config.calibration_size),
         str(request.config.calibration_seed), str(request.config.rank_ratio), str(request.config.alpha),
