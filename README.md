@@ -40,6 +40,23 @@ python -m pip install -e ./poseidon
 python -m pip install -e .
 ```
 
+To reproduce the server's **aimet_env** used for VICON/MPP, use its separately
+pinned Linux x86_64 snapshot (Python 3.11, PyTorch 2.5.1 + CUDA 12.1):
+
+```bash
+conda create -n safesvd-aimet python=3.11 pip
+conda activate safesvd-aimet
+python -m pip install -r requirement.tx
+python -m pip check
+```
+
+`requirement.tx` includes the PyTorch CUDA wheel index and installed package
+versions, with Conda build-machine paths removed. It is a separate environment
+from the newer Poseidon example above; install either in a fresh environment.
+The NVIDIA driver and upstream MPP/Poseidon source are installed separately.
+Regenerate the snapshot from an activated environment with
+`python scripts/export_aimet_requirements.py --output requirement.tx`.
+
 ## Dataset Downloads
 ### Poseidon
 We provide python files to downlaod poseidon downstream datasets, run
@@ -649,8 +666,12 @@ python evaluation/mpp/evaluate.py \
   --max-batches 10
 ```
 
-VICON and MPP call the same research-aligned implementation as the existing
-`safesvd.cli evaluate` compatibility entry. Their default output follows
+VICON and MPP are self-contained under `evaluation/vicon/` and
+`evaluation/mpp/`, following Poseidon's entry-point layout. Each directory
+contains its own model/data loading (`runtime.py`), checkpoint reconstruction
+(`checkpoints.py`) and physical metric formulas (`physics.py`). VICON also
+contains the explicit attention required by compressed checkpoints. These
+entry points do not import the compression packages. Their default output follows
 Poseidon's convention: `<run>/metrics.json` for a checkpoint in a `compressed/`
 directory, otherwise `<checkpoint-parent>/evaluation/<model>/metrics.json`.
 These entries evaluate the requested checkpoint pair and write JSON; the
@@ -663,7 +684,7 @@ metrics.  MPP reports relative error, Sobolev error, and the corresponding incom
 compressible NS, SWE, or diffusion-reaction physical metrics.
 
 MPP defaults to batch size 1 and at most 64 batches per validation file,
-with shuffle seed 0. VICON defaults to batch size 128 and all test batches,
+with shuffle seed 0. VICON defaults to batch size 64 and all test batches,
 using `test_seed` from its configuration (84 by default). For each VICON
 model, the loss pass precedes the physics pass. The same Dataset instances
 are shared across passes and models, so time-pair RNG state advances in the

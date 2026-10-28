@@ -2,8 +2,9 @@
 """Evaluate original and compressed VICON checkpoints with the research protocol.
 
 Defaults match physic_model_comp/vicon/evaluation/eval_comp.py: batch size
-128, all test batches, and advancing loss/physics passes over shared datasets.
-The implementation lives in SAFE-SVD; the research repository is not required.
+64, all test batches, and advancing loss/physics passes over shared datasets.
+Model loading and metric computation live in evaluation/vicon/.
+The compression package and research compression repository are not required.
 """
 
 from __future__ import annotations
@@ -48,7 +49,7 @@ def default_output_path(checkpoint: Path, compressed_model: Path | None) -> Path
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    from safesvd.adapters.vicon_runtime import ViconEvaluationOptions, evaluate_vicon
+    from evaluation.vicon.runtime import ViconEvaluationOptions, evaluate_vicon
 
     root = args.vicon_root.expanduser().resolve()
     checkpoint = args.checkpoint.expanduser().resolve()

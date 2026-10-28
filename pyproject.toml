@@ -13,7 +13,7 @@ safe-svd = "safesvd.cli:main"
 safe-svd-unified = "safe_svd.main:cli_main"
 
 [tool.setuptools.packages.find]
-include = ["safesvd*", "safe_svd*", "VICON*"]
+include = ["safesvd*", "safe_svd*", "VICON*", "evaluation*"]
 
 [tool.setuptools.package-data]
 safe_svd = ["configs/*.yaml"]

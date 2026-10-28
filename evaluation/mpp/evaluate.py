@@ -3,7 +3,8 @@
 
 Defaults match physic_model_comp/mpp/eval/eval_all.py: batch size 1,
 64 batches per validation file, shuffle seed 0, and drop_last=True.
-The implementation lives in SAFE-SVD; the research repository is not required.
+Model loading and metric computation live in evaluation/mpp/.
+The compression package and research compression repository are not required.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from safesvd.adapters.mpp_paths import default_mpp_package
+from evaluation.mpp.paths import default_mpp_package
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -47,7 +48,7 @@ def default_output_path(checkpoint: Path, compressed_model: Path | None) -> Path
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    from safesvd.adapters.mpp_runtime import MPPEvaluationOptions, evaluate_mpp
+    from evaluation.mpp.runtime import MPPEvaluationOptions, evaluate_mpp
 
     root = args.mpp_root.expanduser().resolve()
     checkpoint = args.checkpoint.expanduser().resolve()
