@@ -108,13 +108,10 @@ python -m safe_svd.main \
   --config basic_config \
   --data_root data/raw_data \
   --rank_ratio 0.8 \
-  --rank_selector legacy \
   --calibration_num 8 \
   --calibration_seed 42 \
   --batch_size 1 \
   --alpha 0.7 \
-  --gradient_loss l1 \
-  --decay_alpha 1 \
   --save_path ./artifacts/mpp/0.8/
 ```
 
