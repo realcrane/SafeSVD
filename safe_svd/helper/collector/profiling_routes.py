@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from collections.abc import Mapping
-import math
 
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from .collector import CalibrationBatch, trainer_model, tree_to
+from .progress import calibration_batch_count
 from .mpp.mpp_collector import iter_mpp_batches
 from .vicon.vicon_collector import iter_vicon_batches, prepare_vicon_batch
 from .mpp.mpp_fisher_loss import DSET_SOBOLEV_CONFIG, sobolev_loss_mpp
@@ -51,32 +52,7 @@ def iter_calibration_batches(data, model_type, device, options):
             yield CalibrationBatch(options.get("dataset_name", "poseidon"), batch)
 
 
-def calibration_batch_count(data, model_type, options):
-    """Count sized calibration batches without reading any examples.
-
-    Stream datasets have no exact length; tqdm then displays the batch count
-    and elapsed time without inventing a total.
-    """
-    try:
-        if model_type == "mpp":
-            size = options["params"].batch_size
-            limit = options.get("batches_per_dset", 16)
-            counts = [len(subset) // size for group in data.sub_dsets
-                      for subset in group.get_per_file_dsets()]
-        elif model_type == "vicon":
-            limit = options.get("max_calib_batches")
-            counts = [len(loader) for loader in data.values()]
-        else:
-            limit = options.get("max_calib_batches")
-            loader = data if isinstance(data, DataLoader) else options.get("fisher_loader")
-            counts = [len(loader) if loader is not None else
-                      math.ceil(len(data) / options.get("fisher_batch_size", 16))]
-    except (TypeError, NotImplementedError):
-        return None
-    return sum(min(count, math.ceil(limit)) if limit is not None else count for count in counts)
-
-
-def run_input_profile(model, data, model_type, device, options, set_category):
+def run_input_profile(model, data, model_type, device, options, set_category, *, progress=True):
     """Use full forward / full rollout, rather than compression's early stop."""
     if model_type == "poseidon":
         dataset = data.dataset if isinstance(data, DataLoader) else data
@@ -94,16 +70,22 @@ def run_input_profile(model, data, model_type, device, options, set_category):
                 np.random.seed(seed)
                 torch.manual_seed(seed)
                 torch.cuda.manual_seed_all(seed)
-        for tagged in iter_calibration_batches(data, model_type, device, options):
-            set_category(tagged.category)
-            if model_type == "mpp":
-                inp, labels, bcs, _target = tagged.payload
-                model(inp, labels, bcs)
-            else:
-                trainer = options["trainer"]
-                with trainer_model(trainer, model):
-                    prepared, _, _ = prepare_vicon_batch(trainer, tagged.payload, device)
-                    trainer._model_forward(prepared)
+        batches = iter_calibration_batches(data, model_type, device, options)
+        total = calibration_batch_count(data, model_type, options) if progress else None
+        with tqdm(batches, total=total, desc=f"Input profiling ({model_type})", unit="batch",
+                  dynamic_ncols=True, disable=not progress) as bar:
+            for tagged in bar:
+                set_category(tagged.category)
+                if progress:
+                    bar.set_postfix(dataset=tagged.category)
+                if model_type == "mpp":
+                    inp, labels, bcs, _target = tagged.payload
+                    model(inp, labels, bcs)
+                else:
+                    trainer = options["trainer"]
+                    with trainer_model(trainer, model):
+                        prepared, _, _ = prepare_vicon_batch(trainer, tagged.payload, device)
+                        trainer._model_forward(prepared)
 
 
 def fisher_context(model, model_type, options):

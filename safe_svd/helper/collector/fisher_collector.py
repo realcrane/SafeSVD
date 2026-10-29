@@ -8,9 +8,10 @@ from tqdm.auto import tqdm
 
 from .collector import CovarianceAccumulator, collection_state
 from .profiling_routes import (
-    validate_route, iter_calibration_batches, calibration_batch_count, fisher_context, fisher_options,
+    validate_route, iter_calibration_batches, fisher_context, fisher_options,
     FISHER_LOSS_ROUTES, VICON_SOBOLEV_ORDERS,
 )
+from .progress import calibration_batch_count
 from ..whitener import fisher_whitener
 
 

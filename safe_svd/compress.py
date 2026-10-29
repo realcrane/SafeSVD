@@ -127,7 +127,9 @@ def compress(
     target = torch.device(device)
     teacher = model.to(target).eval()
     student = (copy.deepcopy(teacher) if initial_student is None else initial_student).to(target).eval()
-    context = CaptureContext(teacher, student, calibration_data, target, route_options or {}, ranks=ranks)
+    capture_options = dict(route_options or {})
+    capture_options["progress"] = progress
+    context = CaptureContext(teacher, student, calibration_data, target, capture_options, ranks=ranks)
     collector = capture_fn if capture_fn is not None else routes[model_type]
     since_checkpoint = 0
     bar = tqdm(layers, desc=f"Compression ({model_type})", unit="layer",

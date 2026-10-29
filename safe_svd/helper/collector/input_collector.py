@@ -21,7 +21,7 @@ def collect_inputs(
     model, calibration_data, *, model_type, device="cuda", route_options=None,
     whitening=None, eps=1e-6, eps_mode=None, aggregation=None,
     trace_balance=None, accumulation_dtype=None, product_dtype=torch.float32,
-    return_sample_counts=True, return_statistics=False, missing="identity",
+    return_sample_counts=True, return_statistics=False, missing="identity", progress=True,
 ):
     """Profile all original Linear layers using a shared hook/statistics loop.
 
@@ -29,6 +29,7 @@ def collect_inputs(
     max_calib_batches and train_seed (or cfg.train_seed); Poseidon trainer and optional rollout_fn. Default
     whitening is spectral; Poseidon defaults to sum-equivalent regularization.
     return_statistics returns (metrics, counts, mean_covariances).
+    progress shows completed MPP/VICON profiling batches and the dataset category.
     """
     options = dict(route_options or {})
     validate_route(model_type, options)
@@ -62,7 +63,8 @@ def collect_inputs(
                 def hook(_module, inputs, _output, name=name, features=layer.in_features):
                     stats.add(name, category, inputs[0], features, product_dtype)
                 handles.append(layer.register_forward_hook(hook))
-            run_input_profile(model, calibration_data, model_type, target, options, set_category)
+            run_input_profile(model, calibration_data, model_type, target, options, set_category,
+                              progress=progress)
         finally:
             for handle in handles:
                 handle.remove()

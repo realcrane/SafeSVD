@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import torch
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 from ..collector import CalibrationBatch, CaptureContext, CapturedPairs, capture_input, feature_rows
+from ..progress import calibration_batch_count
 
 
 def iter_mpp_batches(dataset, device, options):
@@ -38,10 +40,17 @@ def collect_mpp(context: CaptureContext, layer_name: str) -> CapturedPairs:
     accepts batches_per_dset (16) and calibration_seed (42).
     """
     features = context.teacher.get_submodule(layer_name).in_features
-    for batch in iter_mpp_batches(context.calibration_data, context.device, context.options):
-        inp, labels, bcs, _target = batch.payload
-        h = capture_input(context.teacher, layer_name, lambda: context.teacher(inp, labels, bcs))
-        hp = capture_input(context.student, layer_name, lambda: context.student(inp, labels, bcs))
-        if h is None or hp is None:
-            raise RuntimeError(f"MPP target {layer_name} was not reached by both models")
-        yield batch.category, feature_rows(h, features), feature_rows(hp, features)
+    progress = context.options.get("progress", True)
+    batches = iter_mpp_batches(context.calibration_data, context.device, context.options)
+    total = calibration_batch_count(context.calibration_data, "mpp", context.options) if progress else None
+    with tqdm(batches, total=total, desc=f"Input capture (mpp): {layer_name}", unit="batch",
+              position=1, leave=False, dynamic_ncols=True, disable=not progress) as bar:
+        for batch in bar:
+            if progress:
+                bar.set_postfix(dataset=batch.category)
+            inp, labels, bcs, _target = batch.payload
+            h = capture_input(context.teacher, layer_name, lambda: context.teacher(inp, labels, bcs))
+            hp = capture_input(context.student, layer_name, lambda: context.student(inp, labels, bcs))
+            if h is None or hp is None:
+                raise RuntimeError(f"MPP target {layer_name} was not reached by both models")
+            yield batch.category, feature_rows(h, features), feature_rows(hp, features)

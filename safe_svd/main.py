@@ -251,6 +251,7 @@ def main(
                 aggregation=aggregation,
                 trace_balance=trace_balance,
                 accumulation_dtype=input_accumulation_dtype,
+                progress=verbose,
             )
             if profile_cache is not None:
                 profile_cache.parent.mkdir(parents=True, exist_ok=True)
