@@ -665,7 +665,7 @@ def resolve_cli_paths(args):
     # Model code comes only from official checkouts inside this repository.
     # User-supplied file paths are relative to the invocation directory.
     if args.model_type == "mpp":
-        args.runtime_root = default_mpp_package(PROJECT_ROOT)
+        args.runtime_root = PROJECT_ROOT / "multiple_physics_pretraining"
         prepared_config = PROJECT_ROOT / "data/official/configs/mpp_avit_L.yaml"
         default_config = (prepared_config if prepared_config.is_file()
                           else PROJECT_ROOT / "safe_svd/configs/mpp_avit_L_config.yaml")
