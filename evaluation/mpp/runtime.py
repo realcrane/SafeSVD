@@ -13,6 +13,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+from evaluation.reporting import build_dataset_results
+
 from .checkpoints import TaggedBatch, load_compressed_state, model_parameter_report, resolve_device, write_json
 from .physics import average_metrics, physics_metrics
 
@@ -75,11 +77,12 @@ def evaluate_mpp(options: MPPEvaluationOptions) -> Path:
     )
     origin = _evaluate_mpp_model(bundle, bundle.model, batches)
     print_summary("Origin", origin)
-    payload: dict[str, Any] = {
+    metadata: dict[str, Any] = {
         "model": "mpp", "protocol": "research_per_file", "split": "val", "sampling_seed": 0,
+        "eval_obj": "ongt",
         "batch_size": int(bundle.params.batch_size), "max_batches_per_file": options.max_batches,
-        "origin": {"model": str(options.model_path), "metrics": origin},
     }
+    compressed_metrics = None
     if options.compressed_path is not None:
         # AViT-L is large enough that keeping its baseline weights on GPU while
         # constructing the compressed topology can exceed ordinary evaluator
@@ -94,11 +97,19 @@ def evaluate_mpp(options: MPPEvaluationOptions) -> Path:
         compressed = load_compressed_state(compressed_bundle.model, options.compressed_path)
         compressed_metrics = _evaluate_mpp_model(compressed_bundle, compressed, batches)
         print_summary("Compressed", compressed_metrics)
-        payload["compressed"] = {
-            "model": str(options.compressed_path),
-            "metrics": compressed_metrics,
-            "increase": _nested_increases(compressed_metrics, origin),
-        }
+    dataset_metadata = {
+        name: {"category": values["category"], "batches": {"origin": values["batches"]}}
+        for name, values in origin["datasets"].items()
+    }
+    if compressed_metrics is not None:
+        for name, values in compressed_metrics["datasets"].items():
+            dataset_metadata[name]["batches"]["compressed"] = values["batches"]
+    payload = build_dataset_results(
+        options.model_path, _dataset_metrics(origin),
+        compressed_model=options.compressed_path,
+        compressed_metrics=_dataset_metrics(compressed_metrics) if compressed_metrics is not None else None,
+        metadata=metadata, dataset_metadata=dataset_metadata,
+    )
     write_json(options.output_path, payload)
     print(f"Saved MPP metrics to {options.output_path}")
     return options.output_path
@@ -272,12 +283,18 @@ def _torch_load(path: Path) -> Any:
         return torch.load(path, map_location="cpu")
 
 
-def _nested_increases(value: Any, baseline: Any) -> Any:
-    if isinstance(value, Mapping) and isinstance(baseline, Mapping):
-        return {key: _nested_increases(item, baseline[key]) for key, item in value.items() if key in baseline}
-    if isinstance(value, (int, float)) and isinstance(baseline, (int, float)) and baseline != 0:
-        return round(100.0 * (float(value) - float(baseline)) / abs(float(baseline)), 6)
-    return None
+def _dataset_metrics(report: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Flatten each dataset report using Poseidon's loss and size field names."""
+    return {
+        name: {
+            **{key: value for key, value in values.items() if key not in {"category", "batches", "mse", "rel_mse"}},
+            "base_loss": values["mse"],
+            "rel_base_loss": values["rel_mse"],
+            "model_size": report["parameters"],
+            "linear_size": report["linear_parameters"],
+        }
+        for name, values in report["datasets"].items()
+    }
 
 
 def print_summary(title: str, report: Mapping[str, Any]) -> None:

@@ -12,6 +12,8 @@ import numpy as np
 import torch.nn as nn
 from torch.utils.data import Dataset
 
+from evaluation.reporting import get_metric_increases
+
 from PDE_calc import CompressibleLoss, EllipticLoss, IncompressibleLoss, WaveLoss
 
 
@@ -194,20 +196,6 @@ def evaluate_and_result(
     result["model_size"] = _as_scalar(rollout_metrics.get("model size", 0))
     result["linear_size"] = count_linear_params(trainer.model)
     return result
-
-
-def get_metric_increases(metrics: dict[str, Any], origin_metrics: dict[str, Any]) -> dict[str, float]:
-    """Percentage differences, rounded to six decimal places, for a compressed model."""
-    excluded = {"model_size", "linear_size"}
-    return {
-        key: round(100.0 * (float(value) - float(origin_metrics[key])) / float(origin_metrics[key]), 6)
-        for key, value in metrics.items()
-        if key in origin_metrics
-        and key not in excluded
-        and isinstance(value, (int, float))
-        and isinstance(origin_metrics[key], (int, float))
-        and float(origin_metrics[key]) != 0.0
-    }
 
 
 def _as_scalar(value: Any) -> Any:

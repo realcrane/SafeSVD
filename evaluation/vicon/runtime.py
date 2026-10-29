@@ -16,6 +16,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 
+from evaluation.reporting import build_dataset_results
+
 from .checkpoints import TaggedBatch, load_compressed_state, model_parameter_report, resolve_device, write_json
 from .attention import convert_attn_to_linear, disable_transformer_fast_path
 from .physics import average_metrics, physics_metrics
@@ -86,15 +88,17 @@ def evaluate_vicon(options: ViconEvaluationOptions) -> Path:
     )
     origin = _evaluate_vicon_model(bundle, bundle.trainer.model, batch_factory)
     print_summary("Origin", origin)
-    payload: dict[str, Any] = {
+    metadata: dict[str, Any] = {
         "model": "vicon",
+        "eval_obj": "ongt",
+        "split": "test",
         "protocol": options.protocol,
         "test_seed": int(getattr(bundle.config, "test_seed", 0)),
         "batch_size": options.batch_size,
         "max_batches": options.max_batches,
         "config_overrides": list(options.config_overrides),
-        "origin": {"model": str(options.model_path), "metrics": origin},
     }
+    compressed_metrics = None
     if options.compressed_path is not None:
         # Do not retain a second full ViCON model on GPU while rebuilding the
         # portable low-rank topology for the compressed evaluator.
@@ -109,11 +113,19 @@ def evaluate_vicon(options: ViconEvaluationOptions) -> Path:
         disable_transformer_fast_path(compressed)
         compressed_metrics = _evaluate_vicon_model(compressed_bundle, compressed, batch_factory)
         print_summary("Compressed", compressed_metrics)
-        payload["compressed"] = {
-            "model": str(options.compressed_path),
-            "metrics": compressed_metrics,
-            "increase": _nested_increases(compressed_metrics, origin),
-        }
+    dataset_metadata = {
+        name: {"sampling": {"origin": _dataset_sampling(origin, name)}}
+        for name in origin["losses"]
+    }
+    if compressed_metrics is not None:
+        for name in compressed_metrics["losses"]:
+            dataset_metadata[name]["sampling"]["compressed"] = _dataset_sampling(compressed_metrics, name)
+    payload = build_dataset_results(
+        options.model_path, _dataset_metrics(origin),
+        compressed_model=options.compressed_path,
+        compressed_metrics=_dataset_metrics(compressed_metrics) if compressed_metrics is not None else None,
+        metadata=metadata, dataset_metadata=dataset_metadata,
+    )
     write_json(options.output_path, payload)
     print(f"Saved VICON metrics to {options.output_path}")
     return options.output_path
@@ -367,12 +379,26 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
-def _nested_increases(value: Any, baseline: Any) -> Any:
-    if isinstance(value, Mapping) and isinstance(baseline, Mapping):
-        return {key: _nested_increases(item, baseline[key]) for key, item in value.items() if key in baseline}
-    if isinstance(value, (int, float)) and isinstance(baseline, (int, float)) and baseline != 0:
-        return round(100.0 * (float(value) - float(baseline)) / abs(float(baseline)), 6)
-    return None
+def _dataset_metrics(report: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Gather each category's losses and physics in a flat Poseidon record."""
+    return {
+        name: {
+            **report["physics"].get(name, {}),
+            "base_loss": loss,
+            "rel_base_loss": report["relative_losses"][name],
+            "model_size": report["parameters"],
+            "linear_size": report["linear_parameters"],
+        }
+        for name, loss in report["losses"].items()
+    }
+
+
+def _dataset_sampling(report: Mapping[str, Any], name: str) -> dict[str, Any]:
+    return {
+        "loss_batches": report["loss_batches"][name],
+        "physics_batches": report["physics_batches"].get(name, 0),
+        "label_energy": report["label_energies"][name],
+    }
 
 
 def print_summary(title: str, report: Mapping[str, Any]) -> None:

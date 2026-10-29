@@ -35,10 +35,13 @@ from typing import Any
 import torch
 from torch.utils.data import Dataset
 
+# Support direct execution from any working directory, as in MPP and VICON.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from evaluation.reporting import build_dataset_results
+
 from physics import (
     evaluate_and_result,
     get_dataset_metrics,
-    get_metric_increases,
 )
 
 
@@ -243,17 +246,16 @@ def main() -> int:
     )
     print_summary("Origin physical metrics", origin_metrics, args.dataset)
 
-    payload: dict[str, Any] = {
-        "dataset": args.dataset,
+    metadata: dict[str, Any] = {
         "eval_obj": args.eval_obj,
         "num_trajectories": args.num_trajectories,
         "final_time": args.final_time,
         "batch_size": args.batch_size,
         "physics_batch_size": args.physics_batch_size,
-        "origin": {"model": str(checkpoint), "metrics": origin_metrics},
     }
 
     # 3. SAFE-SVD model uses the same trainer configuration and test dataset.
+    compressed_metrics = None
     if compressed_model is not None:
         print("Evaluating SAFE-SVD compressed model...")
         compressed_trainer = build_trainer(
@@ -272,11 +274,13 @@ def main() -> int:
             args.physics_batch_size,
         )
         print_summary("Compressed physical metrics", compressed_metrics, args.dataset)
-        payload["compressed"] = {
-            "model": str(compressed_model),
-            "metrics": compressed_metrics,
-            "increase": get_metric_increases(compressed_metrics, origin_metrics),
-        }
+
+    payload = build_dataset_results(
+        checkpoint, {args.dataset: origin_metrics},
+        compressed_model=compressed_model,
+        compressed_metrics={args.dataset: compressed_metrics} if compressed_metrics is not None else None,
+        metadata=metadata,
+    )
 
     output = (
         args.output.expanduser().resolve()
