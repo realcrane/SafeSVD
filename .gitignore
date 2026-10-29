@@ -1,7 +1,9 @@
 # Downloaded or generated ML assets
 artifacts/
 assets/
-data/
+data/PDEBench/
+data/raw_data
+data/processed_data/
 checkpoints/
 rank_cache/
 compressed_models/
