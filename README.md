@@ -4,6 +4,11 @@ Official code for the NeurIPS 2026 paper **[“SAFE-SVD: Sensitivity-Aware Fidel
 
 ## Installation
 
+```
+git clone git@github.com:Evave1204/SAFE-SVD-v0.git
+cd SAFE-SVD-v0
+```
+
 ### Environment
 
 ```bash
@@ -33,9 +38,8 @@ python model_download/model_download.py
 
 Dataset download instructions are provided below. You can also follow the instructions in the [Poseidon](https://github.com/camlab-ethz/poseidon#datasets), [VICON](https://github.com/Eydcao/VICON), and [MPP](https://github.com/PolymathicAI/multiple_physics_pretraining) repositories.
 
-### VICON
-
 ```bash
+python download/poseidon_dataset.py
 mkdir data/raw_data
 cd data
 git clone https://github.com/pdebench/PDEBench.git
