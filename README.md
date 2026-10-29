@@ -2,6 +2,14 @@
 
 Official code for the NeurIPS 2026 paper **[“SAFE-SVD: Sensitivity-Aware Fidelity-Enforcing SVD for Physics Foundation Models”](https://arxiv.org/abs/2605.17985)**.
 
+## Qualitative Results
+
+Rollout comparisons at $t = 5, 10, 15$ between SAFE-SVD (Ours), SVD baselines, the original model (Origin), and ground truth (GT).
+
+![Rollout comparison of velocity components u and v](figures/rollout_velocity.png)
+
+![Rollout comparison of a scalar field](figures/rollout_scalar.png)
+
 ## Installation
 
 ```
