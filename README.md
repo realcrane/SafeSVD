@@ -31,7 +31,7 @@ git clone git@github.com:PolymathicAI/multiple_physics_pretraining.git
 Download the original model checkpoints from [Hugging Face](https://huggingface.co/Evave7/SAFE-SVD) using the following script:
 
 ```bash
-python model_download/model_download.py
+python download/model_download.py
 ```
 
 ### Dataset
@@ -40,24 +40,24 @@ Dataset download instructions are provided below. You can also follow the instru
 
 ```bash
 python download/poseidon_dataset.py
-mkdir data/raw_data
+mkdir data data/raw_data
 cd data
 git clone https://github.com/pdebench/PDEBench.git
 cd PDEBench/pdebench/data_download
-python download_direct.py \ 
-	--root_folder  ../../../raw_data \ # /Path/to/raw_data/
-	--pde_name 2d_cfd \ # for VICON and MPP
-	--pde_name swe \ # MPP
-	--pde_name 2d_reacdiff \ # MPP
-	--pde_name ns_incom # MPP
+python download_direct.py \
+  --root_folder ../../../raw_data \
+  --pde_name 2d_cfd \
+  --pde_name swe \
+  --pde_name 2d_reacdiff \
+  --pde_name ns_incom
 cd ../../../raw_data
-git clone https://huggingface.co/datasets/pdearena/NavierStokes-2D-conditoned #MPP
+git clone https://huggingface.co/datasets/pdearena/NavierStokes-2D-conditoned
 # Data preprocess
-cd ../.. # Path/to/SAFE-SVD
+cd ../..
 python data/prepare/vicon/convert_PDEBench_highVis.py
 python data/prepare/vicon/convert_PDEBench_lowVis.py
 python data/prepare/vicon/split_PDEBench.py
-cp -i configs/mpp/data/mpp_avit_L_config.yaml multiple_physics_pretraining/config/mpp_avit_L_config.yaml
+cp -i safe_svd/configs/mpp_avit_L_config.yaml multiple_physics_pretraining/config/mpp_avit_L_config.yaml
 ```
 
 ## Quick Start
