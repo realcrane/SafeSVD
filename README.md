@@ -40,7 +40,7 @@ Dataset download instructions are provided below. You can also follow the instru
 
 ```bash
 python download/poseidon_dataset.py
-mkdir data data/raw_data
+mkdir data/raw_data
 cd data
 git clone https://github.com/pdebench/PDEBench.git
 cd PDEBench/pdebench/data_download
@@ -64,6 +64,7 @@ cp -i safe_svd/configs/mpp_avit_L_config.yaml multiple_physics_pretraining/confi
 
 ### Compression
 
+#### Poseidon
 ```bash
 python -m safe_svd.main \
   --model poseidon \
@@ -79,15 +80,70 @@ python -m safe_svd.main \
   --alpha 0.7 \
   --save_path ./artifacts/poseidon/0.2/
 ```
+#### VICON
+```
+python -m safe_svd.main \
+  --model vicon \
+  --ckpt_path models/VICON/model.pth \
+  --data_root data/processed_data/2D/CFD/converted/ \
+  --rank_ratio 0.8 \
+  --calibration_num 256 \
+  --batch_size 64 \
+  --alpha 0.7 \
+  --checkpoint_percent 0.1 \
+  --save_path ./artifacts/vicon/0.8/vicon \
+  --DEV cuda \
+  --overwrite_cache
+```
+#### MPP
+```
+python -m safe_svd.main \
+  --model mpp \
+  --ckpt_path models/MPP/MPP_AViT_L \
+  --yaml_config multiple_physics_pretraining/config/mpp_avit_L_config.yaml \
+  --config basic_config \
+  --data_root data/raw_data \
+  --rank_ratio 0.8 \
+  --rank_selector legacy \
+  --calibration_num 8 \
+  --calibration_seed 42 \
+  --batch_size 1 \
+  --alpha 0.7 \
+  --gradient_loss l1 \
+  --decay_alpha 1 \
+  --save_path ./artifacts/mpp/0.8/mpp \
+  --DEV cuda \
+```
 
 ### Evaluation
 
+#### Poseidon
 ```bash
 python evaluation/poseidon/evaluate.py \
 	--poseidon-root ./poseidon \
 	--data-root poseidon/camlab-ethz/down_streams \
 	--checkpoint models/poseidon/fluids.incompressible.PiecewiseConstants \
 	--model artifacts/poseidon/0.2/compressed_model.pt
+```
+
+#### VICON
+```bash
+python evaluation/vicon/evaluate.py \
+  --vicon-root ./VICON \
+  --data-root data/processed_data/2D/CFD/converted/ \
+  --checkpoint models/VICON/model.pth \
+  --model artifacts/vicon/0.8/vicon/compressed_model.pth \
+  --output artifacts/vicon/0.8/vicon/metrics.json
+```
+
+#### MPP
+```bash
+python evaluation/mpp/evaluate.py \
+  --mpp-root ./multiple_physics_pretraining \
+  --data-root data/raw_data \
+  --checkpoint models/MPP/MPP_AViT_L \
+  --model artifacts/mpp/0.8/mpp/compressed_model.pt \
+  --output artifacts/mpp/0.8/mpp/metrics.json
 ```
 
 ## Citation
