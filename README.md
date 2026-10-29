@@ -87,7 +87,7 @@ python -m safe_svd.main \
   --save_path ./artifacts/poseidon/0.2/
 ```
 #### VICON
-```
+```bash
 python -m safe_svd.main \
   --model vicon \
   --ckpt_path models/VICON/model.pth \
@@ -97,12 +97,10 @@ python -m safe_svd.main \
   --batch_size 64 \
   --alpha 0.7 \
   --checkpoint_percent 0.1 \
-  --save_path ./artifacts/vicon/0.8/vicon \
-  --DEV cuda \
-  --overwrite_cache
+  --save_path ./artifacts/vicon/0.8/
 ```
 #### MPP
-```
+```bash
 python -m safe_svd.main \
   --model mpp \
   --ckpt_path models/MPP/MPP_AViT_L \
@@ -117,8 +115,7 @@ python -m safe_svd.main \
   --alpha 0.7 \
   --gradient_loss l1 \
   --decay_alpha 1 \
-  --save_path ./artifacts/mpp/0.8/mpp \
-  --DEV cuda \
+  --save_path ./artifacts/mpp/0.8/
 ```
 
 ### Evaluation
@@ -138,8 +135,8 @@ python evaluation/vicon/evaluate.py \
   --vicon-root ./VICON \
   --data-root data/processed_data/2D/CFD/converted/ \
   --checkpoint models/VICON/model.pth \
-  --model artifacts/vicon/0.8/vicon/compressed_model.pth \
-  --output artifacts/vicon/0.8/vicon/metrics.json
+  --model artifacts/vicon/0.8/compressed_model.pth \
+  --output artifacts/vicon/0.8/metrics.json
 ```
 
 #### MPP
@@ -148,8 +145,8 @@ python evaluation/mpp/evaluate.py \
   --mpp-root ./multiple_physics_pretraining \
   --data-root data/raw_data \
   --checkpoint models/MPP/MPP_AViT_L \
-  --model artifacts/mpp/0.8/mpp/compressed_model.pt \
-  --output artifacts/mpp/0.8/mpp/metrics.json
+  --model artifacts/mpp/0.8/compressed_model.pt \
+  --output artifacts/mpp/0.8/metrics.json
 ```
 
 ## Citation
@@ -157,10 +154,10 @@ python evaluation/mpp/evaluate.py \
 If you use this code in your research, please cite our paper:
 
 ```bibtex
-@article{hong2026safe,
-  title={SAFE-SVD: Sensitivity-Aware Fidelity-Enforcing SVD for Physics Foundation Models},
+@inproceedings{hong2026safe,
   author={Hong, Chengjie and He, Feixiang and Zeng, Yiheng and Kang, Lulu and Wang, He},
-  journal={arXiv preprint arXiv:2605.17985},
-  year={2026}
+  title={SAFE-SVD: Sensitivity-Aware Fidelity-Enforcing SVD for Physics Foundation Models},
+  booktitle = {Neural Information Processing Systems (NeurIPS)},
+  year = {2026}
 }
 ```
