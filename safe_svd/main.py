@@ -36,7 +36,6 @@ from safe_svd.rank import allocate_ranks
 from safe_svd.compress import compress
 from safe_svd.helper.collector import vicon_rng
 from safe_svd.helper.collector.vicon_file_order import apply_vicon_file_order
-from safesvd.adapters.mpp_paths import default_mpp_package
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 

@@ -40,5 +40,4 @@ multiple_physics_pretraining/
 !safe_svd/helper/collector/poseidon/
 !safe_svd/helper/collector/poseidon/**
 
-others/
-*.pyc
+/others/
