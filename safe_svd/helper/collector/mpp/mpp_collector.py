@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 from torch.utils.data import DataLoader
-from .collector import CalibrationBatch, CaptureContext, CapturedPairs, capture_input, feature_rows
+from ..collector import CalibrationBatch, CaptureContext, CapturedPairs, capture_input, feature_rows
 
 
 def iter_mpp_batches(dataset, device, options):

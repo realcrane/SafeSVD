@@ -31,11 +31,11 @@ if __package__ in {None, ""}:
 from safe_svd.helper.perf_logger import make_perf_logger
 from safe_svd.helper.collector.input_collector import collect_inputs
 from safe_svd.helper.collector.fisher_collector import collect_fisher
-from safe_svd.helper.collector.vicon_attention import convert_attn_to_linear
+from safe_svd.helper.collector.vicon.vicon_attention import convert_attn_to_linear
 from safe_svd.rank import allocate_ranks
 from safe_svd.compress import compress
-from safe_svd.helper.collector import vicon_rng
-from safe_svd.helper.collector.vicon_file_order import apply_vicon_file_order
+from safe_svd.helper.collector.vicon import vicon_rng
+from safe_svd.helper.collector.vicon.vicon_file_order import apply_vicon_file_order
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -847,7 +847,7 @@ def load_model_and_data(args):
         import VICON.src.models as models
         import VICON.src.trainer as trainer_module
         from VICON.src.dataset import all_datasets
-        from safe_svd.helper.collector.vicon_calibration_dataset import build_calibration_loaders
+        from safe_svd.helper.collector.vicon.vicon_calibration_dataset import build_calibration_loaders
         with initialize_config_dir(config_dir=str(args.config_dir.resolve()), version_base=None):
             cfg = compose(config_name=args.config_name, overrides=args.config_override)
         with open_dict(cfg):

@@ -17,9 +17,9 @@ from torch import Tensor, nn
 from tqdm.auto import tqdm
 
 from safe_svd.helper.collector.collector import CaptureContext, CaptureFunction, collect_statistics
-from safe_svd.helper.collector.mpp_collector import collect_mpp
+from safe_svd.helper.collector.mpp.mpp_collector import collect_mpp
 from safe_svd.helper.collector.poseidon.poseidon_collector import collect_poseidon
-from safe_svd.helper.collector.vicon_collector import collect_vicon
+from safe_svd.helper.collector.vicon.vicon_collector import collect_vicon
 from safe_svd.helper.whitener import right_whitener
 
 

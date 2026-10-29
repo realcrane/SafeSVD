@@ -11,11 +11,11 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from .collector import CalibrationBatch, trainer_model, tree_to
-from .mpp_collector import iter_mpp_batches
-from .vicon_collector import iter_vicon_batches, prepare_vicon_batch
-from .mpp_fisher_loss import DSET_SOBOLEV_CONFIG, sobolev_loss_mpp
-from .vicon_fisher_loss import sobolev_loss_for_fisher
-from .vicon_fisher_forward import _patched_forward
+from .mpp.mpp_collector import iter_mpp_batches
+from .vicon.vicon_collector import iter_vicon_batches, prepare_vicon_batch
+from .mpp.mpp_fisher_loss import DSET_SOBOLEV_CONFIG, sobolev_loss_mpp
+from .vicon.vicon_fisher_loss import sobolev_loss_for_fisher
+from .vicon.vicon_fisher_forward import _patched_forward
 from .poseidon.fisher_loss import sobolev_loss_calc_denorm
 from .poseidon.input_collector import run_rollout
 

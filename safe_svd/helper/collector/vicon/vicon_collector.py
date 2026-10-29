@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .collector import CalibrationBatch, CaptureContext, CapturedPairs, capture_input, feature_rows, tree_to
+from ..collector import CalibrationBatch, CaptureContext, CapturedPairs, capture_input, feature_rows, tree_to
 
 
 def iter_vicon_batches(loaders, options):
