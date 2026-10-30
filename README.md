@@ -11,8 +11,8 @@ Rollout comparisons at $t = 5, 10, 15$ between SAFE-SVD (Ours), SVD baselines, t
 ## Installation
 
 ```
-git clone git@github.com:Evave1204/SAFE-SVD-v0.git
-cd SAFE-SVD-v0
+git clone git@github.com:realcrane/SafeSVD.git
+cd SafeSVD
 ```
 
 ### Environment
